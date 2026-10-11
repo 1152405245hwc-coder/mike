@@ -334,7 +334,7 @@ alter table public.auth_handoff_tickets enable row level security;
 -- Organizations / RBAC (multi-tenant)
 -- Defined before projects/documents/workflows/tabular_reviews because those
 -- carry an org_id FK to organizations(id). See lib/access.ts for the
--- admin/member enforcement. SSO/SAML/SCIM are intentional extension points
+-- owner/admin/member enforcement. SSO/SAML/SCIM are intentional extension points
 -- (future organizations.sso_config / scim_token).
 --
 -- Personal content is simply `org_id is null`. There is no hidden personal
@@ -353,16 +353,18 @@ create table if not exists public.organizations (
 
 alter table public.organizations enable row level security;
 
--- Exactly two roles. `admin` administers the org and inherits Owner across its
--- content; `member` collaborates and inherits Editor. Membership
--- rows are written only by org creation (the creator) and by invitation
--- acceptance.
+-- Three roles. `owner` is accountable for the org: it alone deletes it and
+-- appoints or removes admins and other owners, and several people may hold it.
+-- `admin` runs it day to day: invitations, members and settings. `member`
+-- collaborates. Owners and admins inherit Owner across the org's content;
+-- members inherit Editor. Membership rows are written only by org creation
+-- (the creator, as owner) and by invitation acceptance.
 create table if not exists public.org_members (
   id uuid primary key default gen_random_uuid(),
   org_id uuid not null references public.organizations(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
   role text not null default 'member'
-    check (role in ('admin', 'member')),
+    check (role in ('owner', 'admin', 'member')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(org_id, user_id)
@@ -373,30 +375,30 @@ create index if not exists idx_org_members_org on public.org_members(org_id);
 
 alter table public.org_members enable row level security;
 
--- DB-level guard for "an organization must keep at least one admin". The
+-- DB-level guard for "an organization must keep at least one owner". The
 -- service layer checks this too, but its read-then-act check races: two
--- concurrent departures of two different admins can both pass and strand the
--- org with nobody able to invite, re-role or remove anyone. The trigger
--- serializes admin departures per org by locking the organizations row, and
+-- concurrent departures of two different owners can both pass and strand the
+-- org with nobody able to delete it or appoint anyone. The trigger
+-- serializes owner departures per org by locking the organizations row, and
 -- steps aside for the two legitimate cascades: org deletion (the org row is
 -- already gone in this transaction) and auth-user deletion (the member's auth
 -- row is already gone). security definer so the auth.users probe works
 -- regardless of the calling role, mirroring handle_new_user.
-create or replace function public.org_members_protect_last_admin()
+create or replace function public.org_members_protect_last_owner()
 returns trigger
 language plpgsql
 security definer
 set search_path = public
 as $$
 begin
-  if old.role <> 'admin' then
+  if old.role <> 'owner' then
     return coalesce(new, old);
   end if;
-  if tg_op = 'UPDATE' and new.role = 'admin' then
+  if tg_op = 'UPDATE' and new.role = 'owner' then
     return new;
   end if;
 
-  -- Serialize concurrent admin departures on this org. If the org row is
+  -- Serialize concurrent owner departures on this org. If the org row is
   -- already deleted in this transaction (delete cascade), stand aside.
   perform 1 from public.organizations where id = old.org_id for update;
   if not found then
@@ -412,9 +414,9 @@ begin
 
   if not exists (
     select 1 from public.org_members
-    where org_id = old.org_id and role = 'admin' and user_id <> old.user_id
+    where org_id = old.org_id and role = 'owner' and user_id <> old.user_id
   ) then
-    raise exception 'An organization must keep at least one admin'
+    raise exception 'An organization must keep at least one owner'
       using errcode = '23514';
   end if;
 
@@ -422,10 +424,10 @@ begin
 end;
 $$;
 
-drop trigger if exists org_members_last_admin_guard on public.org_members;
-create trigger org_members_last_admin_guard
+drop trigger if exists org_members_last_owner_guard on public.org_members;
+create trigger org_members_last_owner_guard
   before delete or update of role on public.org_members
-  for each row execute procedure public.org_members_protect_last_admin();
+  for each row execute procedure public.org_members_protect_last_owner();
 
 -- Invitations. Joining a firm's workspace exposes confidential material, so
 -- membership requires the recipient's consent: an admin creates a pending
@@ -787,7 +789,7 @@ as $$
     when p_org_id is not null then (
       select case
         when p_project_user_id::text = p_user_id then 'owner'
-        when m.role = 'admin' then 'owner'
+        when m.role in ('owner', 'admin') then 'owner'
         when o.role = 'deny' then null
         when o.role in ('owner', 'editor', 'viewer') then o.role
         else 'editor'
@@ -1212,7 +1214,7 @@ as $$
     when p_org_id is not null then (
       select case
         when p_workflow_user_id::text = p_user_id then 'owner'
-        when m.role = 'admin' then 'owner'
+        when m.role in ('owner', 'admin') then 'owner'
         when o.role = 'deny' then null
         when o.role in ('owner', 'editor', 'viewer') then o.role
         else 'editor'
@@ -6526,8 +6528,8 @@ begin
     raise exception 'Organization access overrides require active membership'
       using errcode = '23514';
   end if;
-  if member_role = 'admin' then
-    raise exception 'Organization admins always have owner access'
+  if member_role in ('owner', 'admin') then
+    raise exception 'Organization owners and admins always have owner access'
       using errcode = '23514';
   end if;
   return new;
@@ -6541,16 +6543,16 @@ create trigger workflow_org_access_overrides_guard before insert or update
   on public.workflow_org_access_overrides for each row
   execute procedure public.validate_org_access_override();
 
--- An Admin's Owner access is implicit and immutable. Remove any former member
--- override when they are promoted so management UIs never present it as an
--- editable assignment.
+-- An Owner's or Admin's Owner access is implicit and immutable. Remove any
+-- former member override when they are promoted so management UIs never
+-- present it as an editable assignment.
 create or replace function public.cleanup_org_admin_access_overrides()
 returns trigger
 language plpgsql
 set search_path = public
 as $$
 begin
-  if new.role = 'admin' then
+  if new.role in ('owner', 'admin') then
     delete from public.project_org_access_overrides
     where org_id = new.org_id and user_id = new.user_id;
     delete from public.workflow_org_access_overrides
@@ -7688,5 +7690,6 @@ insert into public.schema_migrations (filename) values
   ('20261008_03_bedrock_azure_user_api_keys.sql'),
   ('20261009_01_vertex_foundry_xai_custom_user_api_keys.sql'),
   ('20261009_02_user_api_key_enabled.sql'),
-  ('20261009_03_schema_migrations.sql')
+  ('20261009_03_schema_migrations.sql'),
+  ('20261011_01_org_owner_role.sql')
 on conflict (filename) do nothing;

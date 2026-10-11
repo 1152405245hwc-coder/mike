@@ -28,6 +28,7 @@ import {
 // gives it meaning, and re-exported here so API consumers do not need two
 // imports to describe one row.
 import type {
+    InvitableOrgRole,
     OrgRole,
     OrganizationAccessOverride,
     ProjectRole,
@@ -1338,7 +1339,7 @@ export async function deleteProject(projectId: string): Promise<void> {
 /**
  * Someone who can administer a resource, with an address to reach them.
  * `source` says how they got there: the creator, a direct Owner grant, or
- * being an Admin of the owning organization.
+ * being an Owner or Admin of the owning organization.
  */
 export interface ProjectContact {
     user_id: string | null;
@@ -1600,7 +1601,7 @@ export async function listOrgInvitations(
 export async function createOrgInvitation(
     orgId: string,
     email: string,
-    role: OrgRole,
+    role: InvitableOrgRole,
 ): Promise<OrgInvitation> {
     return apiRequest<OrgInvitation>(`/orgs/${orgId}/invitations`, {
         method: "POST",

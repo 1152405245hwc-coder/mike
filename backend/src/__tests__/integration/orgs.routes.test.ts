@@ -25,15 +25,15 @@ let writeErrors: Record<string, { message: string; code?: string }>;
 function resetState() {
     idCounter = 1;
     writeErrors = {};
-    currentUser = { id: "admin-1", email: "admin@firm.example" };
+    currentUser = { id: "owner-1", email: "owner@firm.example" };
     tables = {
-        organizations: [{ id: "org-1", name: "Acme LLP", created_by: "admin-1" }],
+        organizations: [{ id: "org-1", name: "Acme LLP", created_by: "owner-1" }],
         org_members: [
             {
                 id: "m-1",
                 org_id: "org-1",
-                user_id: "admin-1",
-                role: "admin",
+                user_id: "owner-1",
+                role: "owner",
                 created_at: "t1",
             },
             {
@@ -47,8 +47,8 @@ function resetState() {
         org_invitations: [],
         user_profiles: [
             {
-                user_id: "admin-1",
-                email: "admin@firm.example",
+                user_id: "owner-1",
+                email: "owner@firm.example",
                 display_name: "Ada",
             },
             {
@@ -60,7 +60,7 @@ function resetState() {
         projects: [
             {
                 id: "proj-1",
-                user_id: "admin-1",
+                user_id: "owner-1",
                 org_id: "org-1",
                 name: "Matter Alpha",
                 created_at: "t1",
@@ -79,7 +79,7 @@ function resetState() {
         tabular_reviews: [
             {
                 id: "review-1",
-                user_id: "admin-1",
+                user_id: "owner-1",
                 project_id: "proj-1",
                 org_id: "org-1",
                 title: "Disclosure review",
@@ -89,7 +89,7 @@ function resetState() {
         workflows: [
             {
                 id: "workflow-1",
-                user_id: "admin-1",
+                user_id: "owner-1",
                 org_id: "org-1",
                 title: "Disclosure workflow",
                 type: "tabular",
@@ -310,17 +310,17 @@ describe("GET /orgs", () => {
 });
 
 describe("POST /orgs", () => {
-    it("creates the org and makes the caller its first admin", async () => {
+    it("creates the org and makes the caller its first owner", async () => {
         as("founder", "founder@new.example");
         const res = await request(app)
             .post("/orgs")
             .set(...AUTH)
             .send({ name: "  New Firm  " });
         expect(res.status).toBe(201);
-        expect(res.body).toMatchObject({ name: "New Firm", role: "admin" });
+        expect(res.body).toMatchObject({ name: "New Firm", role: "owner" });
         expect(
             tables.org_members.filter((m) => m.user_id === "founder"),
-        ).toEqual([expect.objectContaining({ role: "admin" })]);
+        ).toEqual([expect.objectContaining({ role: "owner" })]);
     });
 
     it("400s a blank name", async () => {
@@ -344,9 +344,9 @@ describe("org membership", () => {
         expect(res.status).toBe(200);
         expect(res.body).toEqual([
             expect.objectContaining({
-                user_id: "admin-1",
-                role: "admin",
-                email: "admin@firm.example",
+                user_id: "owner-1",
+                role: "owner",
+                email: "owner@firm.example",
                 display_name: "Ada",
             }),
             expect.objectContaining({
@@ -357,25 +357,57 @@ describe("org membership", () => {
         ]);
     });
 
-    it("409s an attempt to demote the last admin", async () => {
+    it("409s an attempt to demote the last owner", async () => {
         const res = await request(app)
-            .patch("/orgs/org-1/members/admin-1")
+            .patch("/orgs/org-1/members/owner-1")
             .set(...AUTH)
             .send({ role: "member" });
         expect(res.status).toBe(409);
         expect(res.body.detail).toBe(
-            "An organization must keep at least one admin.",
+            "An organization must keep at least one owner.",
         );
     });
 
     it("403s a plain member trying to re-role somebody", async () => {
         as("member-1", "member@firm.example");
         const res = await request(app)
-            .patch("/orgs/org-1/members/admin-1")
+            .patch("/orgs/org-1/members/owner-1")
             .set(...AUTH)
             .send({ role: "member" });
         expect(res.status).toBe(403);
         expect(res.body.detail).toBe("Only an organization admin can do that.");
+    });
+
+    it("403s an admin trying to appoint another admin, naming the owner role", async () => {
+        // A separate refusal from the member's: "only an admin can do that"
+        // would be untrue for somebody who is one.
+        tables.org_members[1].role = "admin";
+        tables.org_members.push({
+            id: "m-3",
+            org_id: "org-1",
+            user_id: "member-2",
+            role: "member",
+            created_at: "t3",
+        });
+        as("member-1", "member@firm.example");
+        const res = await request(app)
+            .patch("/orgs/org-1/members/member-2")
+            .set(...AUTH)
+            .send({ role: "admin" });
+        expect(res.status).toBe(403);
+        expect(res.body.detail).toBe("Only an organization owner can do that.");
+        expect(tables.org_members[2].role).toBe("member");
+    });
+
+    it("403s an admin trying to remove an owner", async () => {
+        tables.org_members[1].role = "admin";
+        as("member-1", "member@firm.example");
+        const res = await request(app)
+            .delete("/orgs/org-1/members/owner-1")
+            .set(...AUTH);
+        expect(res.status).toBe(403);
+        expect(res.body.detail).toBe("Only an organization owner can do that.");
+        expect(tables.org_members).toHaveLength(2);
     });
 
     it("lets a member leave on their own (204)", async () => {
@@ -384,7 +416,7 @@ describe("org membership", () => {
             .delete("/orgs/org-1/members/member-1")
             .set(...AUTH);
         expect(res.status).toBe(204);
-        expect(tables.org_members.map((m) => m.user_id)).toEqual(["admin-1"]);
+        expect(tables.org_members.map((m) => m.user_id)).toEqual(["owner-1"]);
     });
 
     it("has no endpoint that adds a member directly", async () => {
@@ -422,7 +454,7 @@ describe("organization workspace", () => {
         expect(res.status).toBe(404);
     });
 
-    it("requires an admin to empty an organization before deleting it", async () => {
+    it("requires an owner to empty an organization before deleting it", async () => {
         const res = await request(app)
             .delete("/orgs/org-1")
             .set(...AUTH);
@@ -449,6 +481,21 @@ describe("organization workspace", () => {
         expect(res.status).toBe(403);
         expect(tables.organizations).toHaveLength(1);
     });
+
+    it("refuses organization deletion to an admin, even an empty one", async () => {
+        tables.org_members[1].role = "admin";
+        tables.projects = [];
+        tables.chats = [];
+        tables.tabular_reviews = [];
+        tables.workflows = [];
+        as("member-1", "member@firm.example");
+        const res = await request(app)
+            .delete("/orgs/org-1")
+            .set(...AUTH);
+        expect(res.status).toBe(403);
+        expect(res.body.detail).toBe("Only an organization owner can do that.");
+        expect(tables.organizations).toHaveLength(1);
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -463,7 +510,7 @@ async function invite(email: string, role = "member") {
 }
 
 describe("organization invitations", () => {
-    it("an admin invites an email, and no membership appears", async () => {
+    it("an owner invites an email, and no membership appears", async () => {
         const res = await invite("New@Hire.example", "admin");
         expect(res.status).toBe(201);
         expect(res.body).toMatchObject({
@@ -525,7 +572,7 @@ describe("organization invitations", () => {
             expect.objectContaining({
                 email: "new@hire.example",
                 status: "pending",
-                invited_by_email: "admin@firm.example",
+                invited_by_email: "owner@firm.example",
             }),
         ]);
 
@@ -685,16 +732,16 @@ describe("project organization overrides over HTTP", () => {
         const self = await request(app)
             .post("/projects/proj-1/access")
             .set(...AUTH)
-            .send({ email: "Admin@Firm.example", role: "editor" });
+            .send({ email: "Owner@Firm.example", role: "editor" });
         expect(self.status).toBe(400);
     });
 
-    it("does not allow an organization Admin to be overridden", async () => {
+    it.each(["admin", "owner"])("does not allow an organization %s to be overridden", async (role) => {
         tables.org_members.push({
             id: "m-3",
             org_id: "org-1",
             user_id: "admin-2",
-            role: "admin",
+            role,
             created_at: "t3",
         });
         tables.user_profiles.push({
@@ -710,7 +757,7 @@ describe("project organization overrides over HTTP", () => {
 
         expect(res.status).toBe(400);
         expect(res.body.detail).toBe(
-            "Organization admins always have owner access",
+            "Organization owners and admins always have owner access",
         );
         expect(tables.project_org_access_overrides).toEqual([]);
     });
@@ -828,11 +875,11 @@ describe("GET /projects/:projectId admin contacts", () => {
         expect(res.status).toBe(200);
         // owner_email was declared on this shape for a long time and always
         // came back null, so the UI's "ask …" line could never render.
-        expect(res.body.owner_email).toBe("admin@firm.example");
+        expect(res.body.owner_email).toBe("owner@firm.example");
         expect(res.body.owner_display_name).toBe("Ada");
         expect(res.body.admin_contacts).toEqual([
             expect.objectContaining({
-                email: "admin@firm.example",
+                email: "owner@firm.example",
                 source: "creator",
             }),
         ]);
@@ -849,7 +896,7 @@ describe("sendOrgFailure db_error", () => {
         const consoleError = vi
             .spyOn(console, "error")
             .mockImplementation(() => {});
-        as("admin-1", "admin@firm.example");
+        as("owner-1", "owner@firm.example");
         // A realistic Postgres error: it names the schema, the table, the
         // constraint, and quotes the offending row — which in the org tables
         // is somebody's email address.
@@ -888,15 +935,15 @@ describe("sendOrgFailure db_error", () => {
     });
 
     it("still answers intentional 4xx verdicts with their own copy", async () => {
-        as("admin-1", "admin@firm.example");
-        // The last-admin invariant is a decision, not an incident: the caller
+        as("owner-1", "owner@firm.example");
+        // The last-owner invariant is a decision, not an incident: the caller
         // caused it and needs to be told what it was.
         const res = await request(app)
-            .delete("/orgs/org-1/members/admin-1")
+            .delete("/orgs/org-1/members/owner-1")
             .set(...AUTH);
         expect(res.status).toBe(409);
         expect(res.body.detail).toBe(
-            "An organization must keep at least one admin.",
+            "An organization must keep at least one owner.",
         );
     });
 });
