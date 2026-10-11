@@ -62,6 +62,9 @@ function resetState() {
                 id: "proj-1",
                 user_id: "owner-1",
                 org_id: "org-1",
+                // Open to the whole organization: the cases below are about
+                // roles and overrides, not about privacy.
+                visibility: "organization",
                 name: "Matter Alpha",
                 created_at: "t1",
             },
@@ -91,6 +94,7 @@ function resetState() {
                 id: "workflow-1",
                 user_id: "owner-1",
                 org_id: "org-1",
+                visibility: "organization",
                 title: "Disclosure workflow",
                 type: "tabular",
                 created_at: "t4",
@@ -736,7 +740,7 @@ describe("project organization overrides over HTTP", () => {
         expect(self.status).toBe(400);
     });
 
-    it.each(["admin", "owner"])("does not allow an organization %s to be overridden", async (role) => {
+    const addColleague = (role: "owner" | "admin") => {
         tables.org_members.push({
             id: "m-3",
             org_id: "org-1",
@@ -749,6 +753,12 @@ describe("project organization overrides over HTTP", () => {
             email: "partner@firm.example",
             display_name: "Pat",
         });
+    };
+
+    it("does not allow an organization owner to be overridden", async () => {
+        // An owner can open every project in the organization; that is what
+        // stops a matter being orphaned, so it cannot be taken away here.
+        addColleague("owner");
 
         const res = await request(app)
             .post("/projects/proj-1/access")
@@ -757,9 +767,28 @@ describe("project organization overrides over HTTP", () => {
 
         expect(res.status).toBe(400);
         expect(res.body.detail).toBe(
-            "Organization owners and admins always have owner access",
+            "Organization owners always have owner access",
         );
         expect(tables.project_org_access_overrides).toEqual([]);
+    });
+
+    it("walls an organization admin off a project like any other member", async () => {
+        // Administering the organization gives no standing on its content.
+        addColleague("admin");
+
+        const res = await request(app)
+            .post("/projects/proj-1/access")
+            .set(...AUTH)
+            .send({ email: "partner@firm.example", role: "deny" });
+
+        expect(res.status).toBe(201);
+        expect(tables.project_org_access_overrides).toEqual([
+            expect.objectContaining({
+                project_id: "proj-1",
+                user_id: "admin-2",
+                role: "deny",
+            }),
+        ]);
     });
 
     it("403s a member trying to change who has access", async () => {
@@ -884,6 +913,145 @@ describe("GET /projects/:projectId admin contacts", () => {
             }),
         ]);
         expect(res.body.access_role).toBe("editor");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Private by default, and the setting that opens a project to everyone
+// ---------------------------------------------------------------------------
+//
+// proj-1 is seeded public. owner-1 created it and owns the organization;
+// member-1 is a plain member with no override.
+
+describe("project visibility over HTTP", () => {
+    const setVisibility = (visibility: unknown) =>
+        request(app)
+            .patch("/projects/proj-1")
+            .set(...AUTH)
+            .send({ visibility });
+    const peopleEmails = async () => {
+        const res = await request(app)
+            .get("/projects/proj-1/people")
+            .set(...AUTH);
+        expect(res.status).toBe(200);
+        return [
+            res.body.owner?.email,
+            ...res.body.members.map((member: { email: string }) => member.email),
+        ];
+    };
+
+    it("lets every member open a public project, and lists them on its roster", async () => {
+        expect(await peopleEmails()).toEqual([
+            "owner@firm.example",
+            "member@firm.example",
+        ]);
+        as("member-1", "member@firm.example");
+        const res = await request(app).get("/projects/proj-1").set(...AUTH);
+        expect(res.status).toBe(200);
+        expect(res.body.access_role).toBe("editor");
+    });
+
+    it("closes the project to members it was not shared with when made private", async () => {
+        const res = await setVisibility("private");
+        expect(res.status).toBe(200);
+        expect(res.body.visibility).toBe("private");
+        expect(tables.projects[0].visibility).toBe("private");
+
+        // The roster stops claiming the member can read it...
+        expect(await peopleEmails()).toEqual(["owner@firm.example"]);
+        // ...because they cannot: missing, not forbidden, so its existence
+        // is not confirmed either.
+        as("member-1", "member@firm.example");
+        const detail = await request(app).get("/projects/proj-1").set(...AUTH);
+        expect(detail.status).toBe(404);
+        const people = await request(app)
+            .get("/projects/proj-1/people")
+            .set(...AUTH);
+        expect(people.status).toBe(404);
+        // Nor does it appear among the organization's projects for them.
+        const resources = await request(app)
+            .get("/orgs/org-1/resources")
+            .set(...AUTH);
+        expect(resources.body.projects).toEqual([]);
+    });
+
+    it("admits a member to a private project at the role it was shared with them", async () => {
+        await setVisibility("private");
+        const grant = await request(app)
+            .post("/projects/proj-1/access")
+            .set(...AUTH)
+            .send({ email: "member@firm.example", role: "viewer" });
+        expect(grant.status).toBe(201);
+        expect(await peopleEmails()).toEqual([
+            "owner@firm.example",
+            "member@firm.example",
+        ]);
+
+        as("member-1", "member@firm.example");
+        const res = await request(app).get("/projects/proj-1").set(...AUTH);
+        expect(res.status).toBe(200);
+        expect(res.body.access_role).toBe("viewer");
+    });
+
+    it("cannot be shared with somebody outside the organization", async () => {
+        tables.user_profiles.push({
+            user_id: "outsider-1",
+            email: "counsel@elsewhere.example",
+            display_name: "Out",
+        });
+        const res = await request(app)
+            .post("/projects/proj-1/access")
+            .set(...AUTH)
+            .send({ email: "counsel@elsewhere.example", role: "viewer" });
+        expect(res.status).toBe(400);
+        expect(res.body.detail).toBe(
+            "Only current organization members can be assigned a role",
+        );
+        expect(tables.project_org_access_overrides).toEqual([]);
+    });
+
+    it("leaves who can open a project to its owners", async () => {
+        as("member-1", "member@firm.example");
+        const res = await setVisibility("private");
+        expect(res.status).toBe(403);
+        expect(tables.projects[0].visibility).toBe("organization");
+    });
+
+    it("400s a visibility that is not one of the two", async () => {
+        const res = await setVisibility("everyone");
+        expect(res.status).toBe(400);
+        expect(tables.projects[0].visibility).toBe("organization");
+    });
+
+    it("refuses to open a personal project to an organization", async () => {
+        tables.projects[0].org_id = null;
+        tables.projects[0].visibility = "private";
+        const res = await setVisibility("organization");
+        expect(res.status).toBe(400);
+        expect(tables.projects[0].visibility).toBe("private");
+    });
+
+    it("keeps the organization's owners in, whatever the setting", async () => {
+        // A second owner who did not create the project and was never
+        // shared it: that is what stops a matter being orphaned.
+        tables.org_members.push({
+            id: "m-3",
+            org_id: "org-1",
+            user_id: "owner-2",
+            role: "owner",
+            created_at: "t3",
+        });
+        tables.user_profiles.push({
+            user_id: "owner-2",
+            email: "partner@firm.example",
+            display_name: "Pat",
+        });
+        await setVisibility("private");
+
+        as("owner-2", "partner@firm.example");
+        const res = await request(app).get("/projects/proj-1").set(...AUTH);
+        expect(res.status).toBe(200);
+        expect(res.body.access_role).toBe("owner");
     });
 });
 

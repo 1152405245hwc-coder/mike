@@ -356,9 +356,10 @@ alter table public.organizations enable row level security;
 -- Three roles. `owner` is accountable for the org: it alone deletes it and
 -- appoints or removes admins and other owners, and several people may hold it.
 -- `admin` runs it day to day: invitations, members and settings. `member`
--- collaborates. Owners and admins inherit Owner across the org's content;
--- members inherit Editor. Membership rows are written only by org creation
--- (the creator, as owner) and by invitation acceptance.
+-- collaborates. Owners can open every project and workflow in the org; an
+-- admin or member reaches only what they created, what was shared with them,
+-- and what is public (see project_access_role). Membership rows are written
+-- only by org creation (the creator, as owner) and by invitation acceptance.
 create table if not exists public.org_members (
   id uuid primary key default gen_random_uuid(),
   org_id uuid not null references public.organizations(id) on delete cascade,
@@ -699,9 +700,16 @@ create table if not exists public.projects (
   name text not null,
   cm_number text,
   practice text,
-  visibility text not null default 'private',
+  -- 'private': the creator, the organization's owners and the members it has
+  -- been shared with. 'organization': every member of its organization.
+  -- Personal projects are always 'private'; they are shared by direct grant.
+  visibility text not null default 'private'
+    constraint projects_visibility_check
+      check (visibility in ('private', 'organization')),
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint projects_visibility_scope_check
+    check (visibility = 'private' or org_id is not null)
 );
 
 create index if not exists idx_projects_user
@@ -768,8 +776,20 @@ alter table public.project_org_access_overrides enable row level security;
 -- Role resolution, shared by every list RPC
 -- ---------------------------------------------------------------------------
 -- Resolve exactly one sharing scope in one place instead of once per RPC.
--- Organization projects ignore direct grants; personal projects use only a
--- creator or direct grant. Organization overrides replace inherited roles.
+--
+-- Organization content is PRIVATE BY DEFAULT. Inside an organization a
+-- project or workflow is reachable by, in this order:
+--   1. its creator                                  -> owner
+--   2. the organization's owners                    -> owner
+--      (so no matter is ever orphaned; admins get no standing of their own)
+--   3. a member it has been shared with             -> the role they were given
+--      ('deny' walls a member off, including from a public item)
+--   4. every member, when it is public
+--      (visibility = 'organization')                -> editor
+-- Everyone resolved here is a CURRENT member of the organization: sharing
+-- never reaches outside it, and leaving it ends access, the creator's too.
+--
+-- Personal content uses only its creator or a direct email grant.
 --
 -- Returns null when the caller has no access at all, which is how the list
 -- RPCs' visibility predicates and this column stay consistent with each other.
@@ -789,10 +809,14 @@ as $$
     when p_org_id is not null then (
       select case
         when p_project_user_id::text = p_user_id then 'owner'
-        when m.role in ('owner', 'admin') then 'owner'
+        when m.role = 'owner' then 'owner'
         when o.role = 'deny' then null
         when o.role in ('owner', 'editor', 'viewer') then o.role
-        else 'editor'
+        when (
+          select project.visibility from public.projects project
+          where project.id = p_project_id
+        ) = 'organization' then 'editor'
+        else null
       end
       from public.org_members m
       left join public.project_org_access_overrides o
@@ -809,6 +833,38 @@ as $$
         and g.email = lower(p_user_email)
       limit 1
     )
+  end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- How widely an item is shared, as the lists label it
+-- ---------------------------------------------------------------------------
+--   'organization'  public: every member of its organization
+--   'shared'        shared with at least one other person
+--   'private'       its creator only (and, in an organization, its owners)
+-- A 'deny' is not sharing, so it does not make an item 'shared'.
+create or replace function public.project_access_scope(
+  p_project_id uuid,
+  p_org_id uuid,
+  p_visibility text
+)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when p_org_id is not null and p_visibility = 'organization'
+      then 'organization'
+    when p_org_id is not null and exists (
+      select 1 from public.project_org_access_overrides o
+      where o.project_id = p_project_id and o.role <> 'deny'
+    ) then 'shared'
+    when p_org_id is null and exists (
+      select 1 from public.project_access_grants g
+      where g.project_id = p_project_id
+    ) then 'shared'
+    else 'private'
   end;
 $$;
 
@@ -1134,7 +1190,13 @@ create table if not exists public.workflows (
   practice text default 'General Transactions',
   jurisdictions text[] default array['General']::text[],
   org_id uuid references public.organizations(id) on delete restrict,
-  created_at timestamptz not null default now()
+  -- Same meaning as projects.visibility.
+  visibility text not null default 'private'
+    constraint workflows_visibility_check
+      check (visibility in ('private', 'organization')),
+  created_at timestamptz not null default now(),
+  constraint workflows_visibility_scope_check
+    check (visibility = 'private' or org_id is not null)
 );
 
 create index if not exists idx_workflows_user
@@ -1214,10 +1276,14 @@ as $$
     when p_org_id is not null then (
       select case
         when p_workflow_user_id::text = p_user_id then 'owner'
-        when m.role in ('owner', 'admin') then 'owner'
+        when m.role = 'owner' then 'owner'
         when o.role = 'deny' then null
         when o.role in ('owner', 'editor', 'viewer') then o.role
-        else 'editor'
+        when (
+          select workflow.visibility from public.workflows workflow
+          where workflow.id = p_workflow_id
+        ) = 'organization' then 'editor'
+        else null
       end
       from public.org_members m
       left join public.workflow_org_access_overrides o
@@ -1240,6 +1306,31 @@ as $$
         and lower(s.shared_with_email) = lower(p_user_email)
       limit 1
     )
+  end;
+$$;
+
+create or replace function public.workflow_access_scope(
+  p_workflow_id uuid,
+  p_org_id uuid,
+  p_visibility text
+)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when p_org_id is not null and p_visibility = 'organization'
+      then 'organization'
+    when p_org_id is not null and exists (
+      select 1 from public.workflow_org_access_overrides o
+      where o.workflow_id = p_workflow_id and o.role <> 'deny'
+    ) then 'shared'
+    when p_org_id is null and exists (
+      select 1 from public.workflow_shares scope_share
+      where scope_share.workflow_id = p_workflow_id
+    ) then 'shared'
+    else 'private'
   end;
 $$;
 
@@ -1821,14 +1912,7 @@ as $$
       w.id,
       w.user_id::text as user_id,
       w.org_id,
-      case
-        when w.org_id is not null then 'organization'
-        when exists (
-          select 1 from public.workflow_shares scope_share
-          where scope_share.workflow_id = w.id
-        ) then 'shared'
-        else 'private'
-      end as access_scope,
+      public.workflow_access_scope(w.id, w.org_id, w.visibility) as access_scope,
       (
         select nullif(trim(o.name), '')
         from public.organizations o
@@ -1892,7 +1976,7 @@ as $$
       w.id,
       w.user_id::text as user_id,
       w.org_id,
-      'organization'::text as access_scope,
+      public.workflow_access_scope(w.id, w.org_id, w.visibility) as access_scope,
       (
         select nullif(trim(o.name), '')
         from public.organizations o
@@ -2617,14 +2701,7 @@ as $$
     vp.id,
     vp.user_id::text as user_id,
     vp.org_id,
-    case
-      when vp.org_id is not null then 'organization'
-      when exists (
-        select 1 from public.project_access_grants g
-        where g.project_id = vp.id
-      ) then 'shared'
-      else 'private'
-    end as access_scope,
+    public.project_access_scope(vp.id, vp.org_id, vp.visibility) as access_scope,
     (
       select nullif(trim(o.name), '')
       from public.organizations o
@@ -3442,23 +3519,15 @@ as $$
         or (
           p_scope = 'collaborative'
           and (
-            p.org_id is not null
-            or p.user_id is null
+            p.user_id is null
             or p.user_id::text <> p_user_id
-            or exists (
-              select 1 from public.project_access_grants g
-              where g.project_id = p.id
-            )
+            or public.project_access_scope(p.id, p.org_id, p.visibility) <> 'private'
           )
         )
         or (
           p_scope = 'private'
-          and p.org_id is null
           and p.user_id::text = p_user_id
-          and not exists (
-            select 1 from public.project_access_grants g
-            where g.project_id = p.id
-          )
+          and public.project_access_scope(p.id, p.org_id, p.visibility) = 'private'
         )
       )
       and (
@@ -3499,14 +3568,7 @@ as $$
     vp.id,
     vp.user_id::text as user_id,
     vp.org_id,
-    case
-      when vp.org_id is not null then 'organization'
-      when exists (
-        select 1 from public.project_access_grants g
-        where g.project_id = vp.id
-      ) then 'shared'
-      else 'private'
-    end as access_scope,
+    public.project_access_scope(vp.id, vp.org_id, vp.visibility) as access_scope,
     (
       select nullif(trim(o.name), '')
       from public.organizations o
@@ -3601,23 +3663,15 @@ as $$
       or (
         p_scope = 'collaborative'
         and (
-          p.org_id is not null
-          or p.user_id is null
+          p.user_id is null
           or p.user_id::text <> p_user_id
-          or exists (
-            select 1 from public.project_access_grants g
-            where g.project_id = p.id
-          )
+          or public.project_access_scope(p.id, p.org_id, p.visibility) <> 'private'
         )
       )
       or (
         p_scope = 'private'
-        and p.org_id is null
         and p.user_id::text = p_user_id
-        and not exists (
-          select 1 from public.project_access_grants g
-          where g.project_id = p.id
-        )
+        and public.project_access_scope(p.id, p.org_id, p.visibility) = 'private'
       )
     )
     and (
@@ -3703,14 +3757,7 @@ as $$
   with owned as (
     select
       w.id, w.user_id::text as user_id, w.org_id,
-      case
-        when w.org_id is not null then 'organization'
-        when exists (
-          select 1 from public.workflow_shares scope_share
-          where scope_share.workflow_id = w.id
-        ) then 'shared'
-        else 'private'
-      end as access_scope,
+      public.workflow_access_scope(w.id, w.org_id, w.visibility) as access_scope,
       (
         select nullif(trim(o.name), '')
         from public.organizations o
@@ -3759,7 +3806,7 @@ as $$
     -- the caller's point of view.
     select
       w.id, w.user_id::text as user_id, w.org_id,
-      'organization'::text as access_scope,
+      public.workflow_access_scope(w.id, w.org_id, w.visibility) as access_scope,
       (
         select nullif(trim(o.name), '')
         from public.organizations o
@@ -3865,14 +3912,7 @@ as $$
   with owned as (
     select
       w.id, w.user_id::text as user_id,
-      case
-        when w.org_id is not null then 'organization'
-        when exists (
-          select 1 from public.workflow_shares scope_share
-          where scope_share.workflow_id = w.id
-        ) then 'shared'
-        else 'private'
-      end as access_scope,
+      public.workflow_access_scope(w.id, w.org_id, w.visibility) as access_scope,
       w.title, w.practice, w.language, w.jurisdictions,
       w.created_at, 0 as sort_bucket
     from public.workflows w
@@ -3901,7 +3941,7 @@ as $$
     -- compute the same visible set, or "select all matching" silently
     -- omits org-shared rows the list view shows.
     select
-      w.id, w.user_id::text as user_id, 'organization'::text as access_scope,
+      w.id, w.user_id::text as user_id, public.workflow_access_scope(w.id, w.org_id, w.visibility) as access_scope,
       w.title, w.practice, w.language, w.jurisdictions,
       w.created_at, 2 as sort_bucket
     from public.workflows w
@@ -6597,8 +6637,8 @@ begin
     raise exception 'Organization access overrides require active membership'
       using errcode = '23514';
   end if;
-  if member_role in ('owner', 'admin') then
-    raise exception 'Organization owners and admins always have owner access'
+  if member_role = 'owner' then
+    raise exception 'Organization owners always have owner access'
       using errcode = '23514';
   end if;
   return new;
@@ -6612,16 +6652,17 @@ create trigger workflow_org_access_overrides_guard before insert or update
   on public.workflow_org_access_overrides for each row
   execute procedure public.validate_org_access_override();
 
--- An Owner's or Admin's Owner access is implicit and immutable. Remove any
--- former member override when they are promoted so management UIs never
--- present it as an editable assignment.
+-- An organization Owner's Owner access is implicit and immutable. Remove any
+-- former override when somebody is promoted to owner so management UIs never
+-- present it as an editable assignment. An admin has no standing of their own
+-- on content, so theirs is kept: a wall must survive a promotion to admin.
 create or replace function public.cleanup_org_admin_access_overrides()
 returns trigger
 language plpgsql
 set search_path = public
 as $$
 begin
-  if new.role in ('owner', 'admin') then
+  if new.role = 'owner' then
     delete from public.project_org_access_overrides
     where org_id = new.org_id and user_id = new.user_id;
     delete from public.workflow_org_access_overrides
@@ -7761,5 +7802,6 @@ insert into public.schema_migrations (filename) values
   ('20261009_02_user_api_key_enabled.sql'),
   ('20261009_03_schema_migrations.sql'),
   ('20261011_01_org_owner_role.sql'),
-  ('20261011_02_workspace_list_filter.sql')
+  ('20261011_02_workspace_list_filter.sql'),
+  ('20261011_03_org_private_by_default.sql')
 on conflict (filename) do nothing;
