@@ -43,6 +43,7 @@ import type {
     ChatDetailOut,
     ActiveAssistantTurn,
     Citation,
+    ContentVisibility,
     Document,
     Folder,
     LibraryFolder,
@@ -533,6 +534,7 @@ export async function createProject(
     practice?: string,
     org_id?: string,
     memory_enabled?: boolean,
+    visibility?: ContentVisibility,
 ): Promise<Project> {
     return apiRequest<Project>("/projects", {
         method: "POST",
@@ -543,6 +545,7 @@ export async function createProject(
             practice,
             org_id,
             memory_enabled,
+            visibility,
         }),
     });
 }
@@ -1333,6 +1336,7 @@ export async function updateProject(
         name?: string;
         cm_number?: string;
         practice?: string | null;
+        visibility?: ContentVisibility;
     },
 ): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`, {
@@ -3196,6 +3200,7 @@ export async function createWorkflow(payload: {
     skill_md?: string;
     columns_config?: { index: number; name: string; prompt: string }[];
     org_id?: string;
+    visibility?: ContentVisibility;
 }): Promise<Workflow> {
     return apiRequest<Workflow>("/workflows", {
         method: "POST",
@@ -3215,6 +3220,7 @@ export async function updateWorkflow(
         };
         skill_md?: string;
         columns_config?: { index: number; name: string; prompt: string }[];
+        visibility?: ContentVisibility;
     },
 ): Promise<Workflow> {
     return apiRequest<Workflow>(`/workflows/${workflowId}`, {
