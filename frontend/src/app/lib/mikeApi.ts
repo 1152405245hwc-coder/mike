@@ -399,7 +399,14 @@ export async function listProjectsPage(pagination?: {
     search?: string;
     sortKey?: string;
     sortDirection?: "asc" | "desc";
-    scope?: "all" | "mine" | "shared" | "collaborative" | "private";
+    scope?:
+        | "all"
+        | "mine"
+        | "shared"
+        | "collaborative"
+        | "private"
+        | "public"
+        | "nonpublic";
     practice?: string;
     ownerUserId?: string;
     workspace?: string;
@@ -491,7 +498,14 @@ export async function searchProjectDirectory(options: {
 
 export async function listProjectIds(options?: {
     search?: string;
-    scope?: "all" | "mine" | "shared" | "collaborative" | "private";
+    scope?:
+        | "all"
+        | "mine"
+        | "shared"
+        | "collaborative"
+        | "private"
+        | "public"
+        | "nonpublic";
     practice?: string;
     ownerUserId?: string;
     workspace?: string;
@@ -3090,7 +3104,14 @@ export async function listWorkflowsPage(pagination?: {
     search?: string;
     sortKey?: string;
     sortDirection?: "asc" | "desc";
-    scope?: "all" | "owned" | "shared" | "private" | "collaborative";
+    scope?:
+        | "all"
+        | "owned"
+        | "shared"
+        | "private"
+        | "collaborative"
+        | "public"
+        | "nonpublic";
     type?: WorkflowType;
     practice?: string;
     language?: string;
@@ -3122,7 +3143,14 @@ export async function listWorkflowsPage(pagination?: {
 
 export async function listWorkflowIds(options?: {
     search?: string;
-    scope?: "all" | "owned" | "shared" | "private" | "collaborative";
+    scope?:
+        | "all"
+        | "owned"
+        | "shared"
+        | "private"
+        | "collaborative"
+        | "public"
+        | "nonpublic";
     type?: WorkflowType;
     practice?: string;
     language?: string;

@@ -3529,6 +3529,17 @@ as $$
           and p.user_id::text = p_user_id
           and public.project_access_scope(p.id, p.org_id, p.visibility) = 'private'
         )
+        -- The Public and Private tabs: public is open to the whole
+        -- organization; everything else, shared with individuals or not, is
+        -- private.
+        or (
+          p_scope = 'public'
+          and public.project_access_scope(p.id, p.org_id, p.visibility) = 'organization'
+        )
+        or (
+          p_scope = 'nonpublic'
+          and public.project_access_scope(p.id, p.org_id, p.visibility) <> 'organization'
+        )
       )
       and (
         p_search_term is null
@@ -3672,6 +3683,17 @@ as $$
         p_scope = 'private'
         and p.user_id::text = p_user_id
         and public.project_access_scope(p.id, p.org_id, p.visibility) = 'private'
+      )
+      -- The Public and Private tabs: public is open to the whole
+      -- organization; everything else, shared with individuals or not, is
+      -- private.
+      or (
+        p_scope = 'public'
+        and public.project_access_scope(p.id, p.org_id, p.visibility) = 'organization'
+      )
+      or (
+        p_scope = 'nonpublic'
+        and public.project_access_scope(p.id, p.org_id, p.visibility) <> 'organization'
       )
     )
     and (
@@ -3856,6 +3878,8 @@ as $$
         p_scope = 'collaborative'
         and vw.access_scope in ('shared', 'organization')
       )
+      or (p_scope = 'public' and vw.access_scope = 'organization')
+      or (p_scope = 'nonpublic' and vw.access_scope <> 'organization')
     )
     and (
       p_search_term is null
@@ -3971,6 +3995,8 @@ as $$
         p_scope = 'collaborative'
         and vw.access_scope in ('shared', 'organization')
       )
+      or (p_scope = 'public' and vw.access_scope = 'organization')
+      or (p_scope = 'nonpublic' and vw.access_scope <> 'organization')
     )
     and (
       p_search_term is null
@@ -7803,5 +7829,6 @@ insert into public.schema_migrations (filename) values
   ('20261009_03_schema_migrations.sql'),
   ('20261011_01_org_owner_role.sql'),
   ('20261011_02_workspace_list_filter.sql'),
-  ('20261011_03_org_private_by_default.sql')
+  ('20261011_03_org_private_by_default.sql'),
+  ('20261012_01_public_private_list_scopes.sql')
 on conflict (filename) do nothing;
