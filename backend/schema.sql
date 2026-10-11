@@ -2038,13 +2038,48 @@ as $$
   end;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Active workspace filter, shared by every list RPC
+-- ---------------------------------------------------------------------------
+-- A person may belong to several organizations and also holds personal
+-- content (org_id is null). The lists show one workspace at a time:
+--
+--   null        every workspace the caller can reach (callers that predate
+--               workspaces, and pickers that are not scoped yet)
+--   'personal'  content with no organization
+--   <org uuid>  that organization's content
+--
+-- This only ever NARROWS a list. Each RPC still decides visibility with its
+-- access-role function, so naming an organization the caller does not belong
+-- to yields nothing rather than that organization's rows.
+--
+-- CASE, not OR: it guarantees the uuid cast is only reached for a value that
+-- is neither null nor 'personal'. The backend validates the uuid shape first.
+create or replace function public.workspace_matches(
+  p_workspace text,
+  p_org_id uuid
+)
+returns boolean
+language sql
+immutable
+set search_path = public
+as $$
+  select case
+    when p_workspace is null then true
+    when p_workspace = 'personal' then p_org_id is null
+    else p_org_id = p_workspace::uuid
+  end;
+$$;
+
+drop function if exists public.get_chats_overview(text, text, integer, integer, timestamptz, uuid);
 create or replace function public.get_chats_overview(
   p_user_id text,
   p_user_email text,
   p_limit integer default null,
   p_offset integer default 0,
   p_before_updated_at timestamptz default null,
-  p_before_id uuid default null
+  p_before_id uuid default null,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -2097,6 +2132,7 @@ as $$
   -- The join above is for project_name only; the function resolves the
   -- project itself.
   where verdict.role is not null
+    and public.workspace_matches(p_workspace, c.org_id)
     and (
       p_before_updated_at is null
       or c.updated_at < p_before_updated_at
@@ -2750,6 +2786,7 @@ create index if not exists idx_tabular_cells_review
 create index if not exists idx_tabular_cells_review_row
   on public.tabular_cells(review_id, row_id, column_index);
 
+drop function if exists public.get_tabular_reviews_overview(text, text, text, text, integer, integer, text, text, text);
 create or replace function public.get_tabular_reviews_overview(
   p_user_id text,
   p_user_email text,
@@ -2759,7 +2796,8 @@ create or replace function public.get_tabular_reviews_overview(
   p_offset integer,
   p_search_term text,
   p_sort_key text,
-  p_sort_direction text
+  p_sort_direction text,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -2789,6 +2827,7 @@ as $$
     select tr.*
     from public.tabular_reviews tr
     where (p_project_id is null or tr.project_id::text = p_project_id)
+      and public.workspace_matches(p_workspace, tr.org_id)
       and (
         coalesce(p_scope, 'all') = 'all'
         or (p_scope = 'in-project' and tr.project_id is not null)
@@ -2914,6 +2953,7 @@ as $$
   );
 $$;
 
+drop function if exists public.get_tabular_review_ids_overview(text, text, text, text, text, integer, integer);
 create or replace function public.get_tabular_review_ids_overview(
   p_user_id text,
   p_user_email text,
@@ -2921,7 +2961,8 @@ create or replace function public.get_tabular_review_ids_overview(
   p_scope text,
   p_search_term text,
   p_limit integer,
-  p_offset integer
+  p_offset integer,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -2940,6 +2981,7 @@ as $$
   select tr.id, tr.user_id::text as user_id
   from public.tabular_reviews tr
   where (p_project_id is null or tr.project_id::text = p_project_id)
+    and public.workspace_matches(p_workspace, tr.org_id)
     and (
       coalesce(p_scope, 'all') = 'all'
       or (p_scope = 'in-project' and tr.project_id is not null)
@@ -3174,9 +3216,11 @@ as $$
     );
 $$;
 
+drop function if exists public.get_project_filter_options(text, text);
 create or replace function public.get_project_filter_options(
   p_user_id text,
-  p_user_email text default null
+  p_user_email text default null,
+  p_workspace text default null
 )
 returns table (practices text[], owners jsonb)
 language sql
@@ -3188,6 +3232,7 @@ as $$
     where public.project_access_role(
       p.id, p.user_id, p.org_id, p_user_id, p_user_email
     ) is not null
+      and public.workspace_matches(p_workspace, p.org_id)
   ),
   distinct_owners as (
     -- NULL is not an owner. A project whose creator's account was deleted
@@ -3230,11 +3275,13 @@ as $$
     ) as owners;
 $$;
 
+drop function if exists public.get_workflow_filter_options(text, text, text, text);
 create or replace function public.get_workflow_filter_options(
   p_user_id text,
   p_user_email text default null,
   p_type text default null,
-  p_scope text default 'all'
+  p_scope text default 'all',
+  p_workspace text default null
 )
 returns table (
   practices text[],
@@ -3252,6 +3299,7 @@ as $$
         w.id, w.user_id, w.org_id, p_user_id, p_user_email
       ) is not null
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
   ),
   shared as (
     select w.practice, w.language, w.jurisdictions, 'shared'::text as source
@@ -3260,6 +3308,7 @@ as $$
     where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
       and w.org_id is null
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
   ),
   org_shared as (
     -- Same org-membership arm as get_workflows_overview, including the
@@ -3271,6 +3320,7 @@ as $$
     where w.org_id is not null
       and (w.user_id is null or w.user_id::text <> p_user_id)
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
       and public.workflow_access_role(
         w.id, w.user_id, w.org_id, p_user_id, p_user_email
       ) is not null
@@ -3342,6 +3392,7 @@ create index if not exists projects_name_trgm_idx
 create index if not exists projects_updated_at_idx
   on public.projects(updated_at desc, id);
 
+drop function if exists public.get_projects_overview(text, text, text, integer, integer, text, text, text, text, text);
 create or replace function public.get_projects_overview(
   p_user_id text,
   p_user_email text,
@@ -3352,7 +3403,8 @@ create or replace function public.get_projects_overview(
   p_sort_key text,
   p_sort_direction text,
   p_practice text,
-  p_owner_user_id text
+  p_owner_user_id text,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -3382,6 +3434,7 @@ as $$
     where public.project_access_role(
         p.id, p.user_id, p.org_id, p_user_id, p_user_email
       ) is not null
+      and public.workspace_matches(p_workspace, p.org_id)
       and (
         coalesce(p_scope, 'all') = 'all'
         or (p_scope = 'mine' and p.user_id::text = p_user_id)
@@ -3516,6 +3569,7 @@ $$;
 -- Paginated (not "return everything") because PostgREST enforces its own
 -- row cap on every RPC response and truncates silently rather than erroring;
 -- backend/src/routes/projects.ts pages through this on the caller's behalf.
+drop function if exists public.get_project_ids_overview(text, text, text, text, text, text, integer, integer);
 create or replace function public.get_project_ids_overview(
   p_user_id text,
   p_user_email text,
@@ -3524,7 +3578,8 @@ create or replace function public.get_project_ids_overview(
   p_practice text,
   p_owner_user_id text,
   p_limit integer,
-  p_offset integer
+  p_offset integer,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -3538,6 +3593,7 @@ as $$
   where public.project_access_role(
       p.id, p.user_id, p.org_id, p_user_id, p_user_email
     ) is not null
+    and public.workspace_matches(p_workspace, p.org_id)
     and (
       coalesce(p_scope, 'all') = 'all'
       or (p_scope = 'mine' and p.user_id::text = p_user_id)
@@ -3606,6 +3662,7 @@ create index if not exists workflows_jurisdictions_gin_idx
 -- and "collaborative" filter by access model. Collaborative includes direct
 -- grants and organization access, including resources created by the caller.
 -- This RPC never includes system workflows.
+drop function if exists public.get_workflows_overview(text, text, text, text, integer, integer, text, text, text, text, text, text);
 create or replace function public.get_workflows_overview(
   p_user_id text,
   p_user_email text,
@@ -3618,7 +3675,8 @@ create or replace function public.get_workflows_overview(
   p_sort_direction text,
   p_practice text,
   p_language text,
-  p_jurisdiction text
+  p_jurisdiction text,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -3669,6 +3727,7 @@ as $$
         w.id, w.user_id, w.org_id, p_user_id, p_user_email
       ) is not null
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
   ),
   shared as (
     select
@@ -3689,6 +3748,7 @@ as $$
     where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
       and w.org_id is null
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
   ),
   org_shared as (
     -- Workflows in an org the caller belongs to. Admins default to Owner and
@@ -3722,6 +3782,7 @@ as $$
     where w.org_id is not null
       and (w.user_id is null or w.user_id::text <> p_user_id)
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
       and public.workflow_access_role(
         w.id, w.user_id, w.org_id, p_user_id, p_user_email
       ) is not null
@@ -3780,6 +3841,7 @@ $$;
 -- Duplicates the owned predicate directly rather than delegating to
 -- get_workflows_overview, same rationale as get_project_ids_overview: no
 -- need for the shared-by-name join when the caller only wants ids.
+drop function if exists public.get_workflow_ids_overview(text, text, text, text, text, text, text, text, integer, integer);
 create or replace function public.get_workflow_ids_overview(
   p_user_id text,
   p_user_email text,
@@ -3790,7 +3852,8 @@ create or replace function public.get_workflow_ids_overview(
   p_language text,
   p_jurisdiction text,
   p_limit integer,
-  p_offset integer
+  p_offset integer,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -3818,6 +3881,7 @@ as $$
         w.id, w.user_id, w.org_id, p_user_id, p_user_email
       ) is not null
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
   ),
   shared as (
     select
@@ -3830,6 +3894,7 @@ as $$
     where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
       and w.org_id is null
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
   ),
   org_shared as (
     -- Same org-membership arm as get_workflows_overview: the ids RPC must
@@ -3843,6 +3908,7 @@ as $$
     where w.org_id is not null
       and (w.user_id is null or w.user_id::text <> p_user_id)
       and (p_type is null or w.type = p_type)
+      and public.workspace_matches(p_workspace, w.org_id)
       and public.workflow_access_role(
         w.id, w.user_id, w.org_id, p_user_id, p_user_email
       ) is not null
@@ -7691,5 +7757,6 @@ insert into public.schema_migrations (filename) values
   ('20261009_01_vertex_foundry_xai_custom_user_api_keys.sql'),
   ('20261009_02_user_api_key_enabled.sql'),
   ('20261009_03_schema_migrations.sql'),
-  ('20261011_01_org_owner_role.sql')
+  ('20261011_01_org_owner_role.sql'),
+  ('20261011_02_workspace_list_filter.sql')
 on conflict (filename) do nothing;
