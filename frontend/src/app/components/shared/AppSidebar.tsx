@@ -37,6 +37,7 @@ import {
     DropdownSeparator,
     DropdownTrigger,
 } from "@/shared/ui/dropdown";
+import { SidebarHeading } from "@/app/components/shared/SidebarHeading";
 import { SidebarProjectItem } from "@/app/components/shared/SidebarProjectItem";
 import {
     ChatSkeuoIcon,
@@ -427,28 +428,14 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
                                         className="h-5 w-28 rounded bg-gray-200 animate-pulse"
                                     />
                                 ) : (
-                                    // The row keeps its fixed height, so an
-                                    // organization's name is set smaller than
-                                    // "Mike" and may run to a second line.
-                                    // Only a name longer than that is cut,
-                                    // and the title carries it in full.
-                                    <span
-                                        data-slot="sidebar-heading"
-                                        title={
-                                            activeOrganization
-                                                ? sidebarHeading
+                                    <SidebarHeading
+                                        name={sidebarHeading}
+                                        className={
+                                            shouldAnimate
+                                                ? "sidebar-fade-in"
                                                 : undefined
                                         }
-                                        className={cn(
-                                            "min-w-0 font-light font-serif",
-                                            activeOrganization
-                                                ? "line-clamp-2 break-words text-base leading-tight"
-                                                : "text-xl",
-                                            shouldAnimate && "sidebar-fade-in",
-                                        )}
-                                    >
-                                        {sidebarHeading}
-                                    </span>
+                                    />
                                 )}
                             </Link>
                         </div>
