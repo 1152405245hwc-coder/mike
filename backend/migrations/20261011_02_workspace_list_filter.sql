@@ -971,3 +971,38 @@ as $$
   limit greatest(coalesce(p_limit, 1000), 1)
   offset greatest(coalesce(p_offset, 0), 0);
 $$;
+drop function if exists public.get_project_summaries(text, text, integer, integer);
+create or replace function public.get_project_summaries(
+  p_user_id text,
+  p_user_email text,
+  p_limit integer,
+  p_offset integer,
+  p_workspace text default null
+)
+returns table (
+  id uuid,
+  user_id text,
+  name text,
+  created_at timestamptz,
+  updated_at timestamptz,
+  is_owner boolean
+)
+language sql
+stable
+as $$
+  select
+    p.id,
+    p.user_id::text as user_id,
+    p.name,
+    p.created_at,
+    p.updated_at,
+    coalesce(p.user_id::text = p_user_id, false) as is_owner
+  from public.projects p
+  where public.project_access_role(
+    p.id, p.user_id, p.org_id, p_user_id, p_user_email
+  ) is not null
+    and public.workspace_matches(p_workspace, p.org_id)
+  order by p.updated_at desc, p.created_at desc, p.id asc
+  limit greatest(coalesce(p_limit, 11), 1)
+  offset greatest(coalesce(p_offset, 0), 0);
+$$;

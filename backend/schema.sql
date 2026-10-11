@@ -3950,11 +3950,13 @@ $$;
 -- Lightweight sidebar project feed. The Projects overview RPC intentionally
 -- computes file/chat/review counts for table sorting; the sidebar needs none
 -- of those aggregates.
+drop function if exists public.get_project_summaries(text, text, integer, integer);
 create or replace function public.get_project_summaries(
   p_user_id text,
   p_user_email text,
   p_limit integer,
-  p_offset integer
+  p_offset integer,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -3978,6 +3980,7 @@ as $$
   where public.project_access_role(
     p.id, p.user_id, p.org_id, p_user_id, p_user_email
   ) is not null
+    and public.workspace_matches(p_workspace, p.org_id)
   order by p.updated_at desc, p.created_at desc, p.id asc
   limit greatest(coalesce(p_limit, 11), 1)
   offset greatest(coalesce(p_offset, 0), 0);

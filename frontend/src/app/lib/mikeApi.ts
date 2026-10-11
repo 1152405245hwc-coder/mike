@@ -401,6 +401,7 @@ export async function listProjectsPage(pagination?: {
     scope?: "all" | "mine" | "shared" | "collaborative" | "private";
     practice?: string;
     ownerUserId?: string;
+    workspace?: string;
     signal?: AbortSignal;
 }): Promise<Project[]> {
     const params = new URLSearchParams();
@@ -415,6 +416,7 @@ export async function listProjectsPage(pagination?: {
     if (pagination?.practice) params.set("practice", pagination.practice);
     if (pagination?.ownerUserId)
         params.set("owner_user_id", pagination.ownerUserId);
+    if (pagination?.workspace) params.set("workspace", pagination.workspace);
 
     const qs = params.toString() ? `?${params.toString()}` : "";
     return apiRequest<Project[]>(`/projects${qs}`, {
@@ -425,6 +427,7 @@ export async function listProjectsPage(pagination?: {
 export async function listProjectSummaries(pagination?: {
     limit?: number;
     offset?: number;
+    workspace?: string;
     signal?: AbortSignal;
 }): Promise<Project[]> {
     const params = new URLSearchParams();
@@ -433,6 +436,7 @@ export async function listProjectSummaries(pagination?: {
     if (pagination?.offset != null)
         params.set("offset", String(pagination.offset));
     params.set("view", "summary");
+    if (pagination?.workspace) params.set("workspace", pagination.workspace);
     return apiRequest<Project[]>(`/projects?${params.toString()}`, {
         signal: pagination?.signal,
     });
@@ -489,6 +493,7 @@ export async function listProjectIds(options?: {
     scope?: "all" | "mine" | "shared" | "collaborative" | "private";
     practice?: string;
     ownerUserId?: string;
+    workspace?: string;
     signal?: AbortSignal;
 }): Promise<{ id: string; user_id: string }[]> {
     const params = new URLSearchParams();
@@ -497,6 +502,7 @@ export async function listProjectIds(options?: {
         params.set("scope", options.scope);
     if (options?.practice) params.set("practice", options.practice);
     if (options?.ownerUserId) params.set("owner_user_id", options.ownerUserId);
+    if (options?.workspace) params.set("workspace", options.workspace);
 
     const qs = params.toString() ? `?${params.toString()}` : "";
     return apiRequest<{ id: string; user_id: string }[]>(`/projects/ids${qs}`, {
@@ -511,8 +517,12 @@ export interface ProjectFilterOptions {
 
 export async function getProjectFilterOptions(
     signal?: AbortSignal,
+    workspace?: string,
 ): Promise<ProjectFilterOptions> {
-    return apiRequest<ProjectFilterOptions>("/projects/filter-options", {
+    const qs = workspace
+        ? `?${new URLSearchParams({ workspace }).toString()}`
+        : "";
+    return apiRequest<ProjectFilterOptions>(`/projects/filter-options${qs}`, {
         signal,
     });
 }
@@ -2315,6 +2325,7 @@ export async function listChats(options?: {
     offset?: number;
     beforeUpdatedAt?: string;
     beforeId?: string;
+    workspace?: string;
 }): Promise<Chat[]> {
     const params = new URLSearchParams();
     if (options?.limit) params.set("limit", String(options.limit));
@@ -2322,6 +2333,7 @@ export async function listChats(options?: {
     if (options?.beforeUpdatedAt)
         params.set("before_updated_at", options.beforeUpdatedAt);
     if (options?.beforeId) params.set("before_id", options.beforeId);
+    if (options?.workspace) params.set("workspace", options.workspace);
     const query = params.toString();
     return apiRequest<Chat[]>(`/chat${query ? `?${query}` : ""}`);
 }
@@ -2590,6 +2602,7 @@ export async function listTabularReviews(
         sortKey?: string;
         sortDirection?: "asc" | "desc";
         scope?: "all" | "in-project" | "standalone";
+        workspace?: string;
         signal?: AbortSignal;
     },
 ): Promise<TabularReview[]> {
@@ -2603,6 +2616,7 @@ export async function listTabularReviews(
         params.set("sort_direction", pagination.sortDirection);
     if (pagination?.scope && pagination.scope !== "all")
         params.set("scope", pagination.scope);
+    if (pagination?.workspace) params.set("workspace", pagination.workspace);
 
     const qs = params.toString() ? `?${params.toString()}` : "";
     return apiRequest<TabularReview[]>(`/tabular-review${qs}`, {
@@ -2615,6 +2629,7 @@ export async function listTabularReviewIds(
     options?: {
         search?: string;
         scope?: "all" | "in-project" | "standalone";
+        workspace?: string;
         signal?: AbortSignal;
     },
 ): Promise<{ id: string; user_id: string }[]> {
@@ -2623,6 +2638,7 @@ export async function listTabularReviewIds(
     if (options?.search) params.set("search", options.search);
     if (options?.scope && options.scope !== "all")
         params.set("scope", options.scope);
+    if (options?.workspace) params.set("workspace", options.workspace);
 
     const qs = params.toString() ? `?${params.toString()}` : "";
     return apiRequest<{ id: string; user_id: string }[]>(
@@ -3075,6 +3091,7 @@ export async function listWorkflowsPage(pagination?: {
     practice?: string;
     language?: string;
     jurisdiction?: string;
+    workspace?: string;
     signal?: AbortSignal;
 }): Promise<Workflow[]> {
     const params = new URLSearchParams();
@@ -3091,6 +3108,7 @@ export async function listWorkflowsPage(pagination?: {
     if (pagination?.language) params.set("language", pagination.language);
     if (pagination?.jurisdiction)
         params.set("jurisdiction", pagination.jurisdiction);
+    if (pagination?.workspace) params.set("workspace", pagination.workspace);
 
     const qs = params.toString() ? `?${params.toString()}` : "";
     return apiRequest<Workflow[]>(`/workflows${qs}`, {
@@ -3105,6 +3123,7 @@ export async function listWorkflowIds(options?: {
     practice?: string;
     language?: string;
     jurisdiction?: string;
+    workspace?: string;
     signal?: AbortSignal;
 }): Promise<{ id: string; user_id: string }[]> {
     const params = new URLSearchParams();
@@ -3115,6 +3134,7 @@ export async function listWorkflowIds(options?: {
     if (options?.practice) params.set("practice", options.practice);
     if (options?.language) params.set("language", options.language);
     if (options?.jurisdiction) params.set("jurisdiction", options.jurisdiction);
+    if (options?.workspace) params.set("workspace", options.workspace);
 
     const qs = params.toString() ? `?${params.toString()}` : "";
     return apiRequest<{ id: string; user_id: string }[]>(
@@ -3144,12 +3164,14 @@ export interface WorkflowFilterOptions {
 export async function getWorkflowFilterOptions(options?: {
     type?: WorkflowType;
     scope?: "all" | "owned" | "shared";
+    workspace?: string;
     signal?: AbortSignal;
 }): Promise<WorkflowFilterOptions> {
     const params = new URLSearchParams();
     if (options?.type) params.set("type", options.type);
     if (options?.scope && options.scope !== "all")
         params.set("scope", options.scope);
+    if (options?.workspace) params.set("workspace", options.workspace);
     const query = params.toString();
     return apiRequest<WorkflowFilterOptions>(
         `/workflows/filter-options${query ? `?${query}` : ""}`,
