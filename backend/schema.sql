@@ -350,6 +350,10 @@ create table if not exists public.organizations (
   -- Whether work in this organization may run on a member's own provider
   -- key when the organization has none for that provider (org_api_keys).
   allow_personal_api_keys boolean not null default true,
+  -- When the organization's logo (org_logos) was last set, or null for none.
+  -- Kept in step by a trigger on org_logos; clients read it to know whether
+  -- there is a logo and when to fetch it again.
+  logo_updated_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -607,6 +611,50 @@ begin
     with ordinality as selected(model_id, ordinality);
 end;
 $$;
+
+-- An organization's logo, shown in the sidebar in place of the app's while its
+-- workspace is active. In a table of its own so that reading an organization
+-- (`select *`, in many places) never carries the image; what organizations
+-- carry is logo_updated_at. Base64 text, at most 512 KiB of image.
+create table if not exists public.org_logos (
+  org_id uuid primary key references public.organizations(id) on delete cascade,
+  content_type text not null
+    constraint org_logos_content_type_check
+    check (content_type in ('image/png', 'image/jpeg', 'image/webp')),
+  -- 512 KiB of image is 699,052 base64 characters.
+  data_base64 text not null
+    constraint org_logos_data_size_check
+    check (char_length(data_base64) between 1 and 699052),
+  -- Who set it last. Provenance for the organization's admins; the logo
+  -- outlives the account.
+  updated_by uuid references auth.users(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.org_logos enable row level security;
+
+create or replace function public.sync_org_logo_updated_at()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if tg_op = 'DELETE' then
+    -- When the organization itself is being deleted this matches no row.
+    update public.organizations set logo_updated_at = null
+    where id = old.org_id;
+    return old;
+  end if;
+  update public.organizations set logo_updated_at = new.updated_at
+  where id = new.org_id;
+  return new;
+end;
+$$;
+
+drop trigger if exists org_logos_sync_updated_at on public.org_logos;
+create trigger org_logos_sync_updated_at
+  after insert or update or delete on public.org_logos
+  for each row execute procedure public.sync_org_logo_updated_at();
 
 -- An organization's own model list for each "model list" provider. Where
 -- the organization holds the key (org_api_keys), this list decides which
@@ -7089,6 +7137,7 @@ revoke all on public.org_api_keys from anon, authenticated;
 revoke all on public.auth_handoff_tickets from anon, authenticated;
 revoke all on public.user_router_models from anon, authenticated;
 revoke all on public.org_router_models from anon, authenticated;
+revoke all on public.org_logos from anon, authenticated;
 revoke all on public.user_mcp_connectors from anon, authenticated;
 revoke all on public.user_mcp_oauth_tokens from anon, authenticated;
 revoke all on public.user_mcp_oauth_states from anon, authenticated;
@@ -7152,6 +7201,8 @@ revoke all on function public.refresh_memory_file_status(uuid, bigint, uuid, tex
 revoke all on function public.replace_user_router_models(uuid, text, text[])
   from public, anon, authenticated;
 revoke all on function public.replace_org_router_models(uuid, text, text[])
+  from public, anon, authenticated;
+revoke all on function public.sync_org_logo_updated_at()
   from public, anon, authenticated;
 revoke all on function public.begin_tabular_review_generation(uuid, timestamptz, uuid, integer)
   from public, anon, authenticated;
@@ -8046,5 +8097,6 @@ insert into public.schema_migrations (filename) values
   ('20261012_01_public_private_list_scopes.sql'),
   ('20261012_02_org_api_keys.sql'),
   ('20261012_03_org_router_models.sql'),
-  ('20261012_04_org_owner_private_access.sql')
+  ('20261012_04_org_owner_private_access.sql'),
+  ('20261012_05_org_logos.sql')
 on conflict (filename) do nothing;

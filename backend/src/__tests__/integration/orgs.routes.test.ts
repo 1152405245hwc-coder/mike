@@ -1489,6 +1489,158 @@ describe("organization provider keys", () => {
     });
 });
 
+// ---------------------------------------------------------------------------
+// Organization logo
+// ---------------------------------------------------------------------------
+
+describe("organization logo", () => {
+    // The smallest things that are really each format: the signature a file
+    // of that type begins with, and a little after it.
+    const dataUrl = (type: string, bytes: number[]) =>
+        `data:${type};base64,${Buffer.from(bytes).toString("base64")}`;
+    const PNG = dataUrl(
+        "image/png",
+        [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4],
+    );
+    const JPEG = dataUrl("image/jpeg", [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+    const WEBP = dataUrl(
+        "image/webp",
+        [...Buffer.from("RIFF"), 0, 0, 0, 0, ...Buffer.from("WEBP"), 1, 2],
+    );
+
+    beforeEach(() => {
+        tables.org_logos = [];
+        tables.org_members.push({
+            id: "m-3",
+            org_id: "org-1",
+            user_id: "admin-1",
+            role: "admin",
+            created_at: "t3",
+        });
+    });
+
+    const putLogo = (data_url: unknown) =>
+        request(app).put("/orgs/org-1/logo").set(...AUTH).send({ data_url });
+    const getLogo = () => request(app).get("/orgs/org-1/logo").set(...AUTH);
+
+    it("has none until one is set", async () => {
+        expect((await getLogo()).status).toBe(404);
+    });
+
+    it.each([
+        ["PNG", PNG, "image/png"],
+        ["JPEG", JPEG, "image/jpeg"],
+        ["WebP", WEBP, "image/webp"],
+    ])("lets an owner set a %s logo, and every member read it back", async (_name, image, type) => {
+        const saved = await putLogo(image);
+
+        expect(saved.status).toBe(200);
+        expect(typeof saved.body.logo_updated_at).toBe("string");
+        expect(tables.org_logos).toEqual([
+            expect.objectContaining({
+                org_id: "org-1",
+                content_type: type,
+                updated_by: "owner-1",
+            }),
+        ]);
+        expect(tables.audit_events).toEqual([
+            expect.objectContaining({ action: "org.logo.updated" }),
+        ]);
+        // The image is not written into the audit trail.
+        expect(JSON.stringify(tables.audit_events)).not.toContain(
+            image.split(",")[1],
+        );
+
+        as("member-1", "member@firm.example");
+        const read = await getLogo();
+        expect(read.status).toBe(200);
+        expect(read.body.data_url).toBe(image);
+    });
+
+    it("lets an admin set it too, and replaces rather than adds", async () => {
+        await putLogo(PNG);
+        as("admin-1", "admin@firm.example");
+
+        expect((await putLogo(JPEG)).status).toBe(200);
+
+        expect(tables.org_logos).toHaveLength(1);
+        expect(tables.org_logos[0]).toMatchObject({
+            content_type: "image/jpeg",
+            updated_by: "admin-1",
+        });
+    });
+
+    it("refuses a plain member and hides the organization from an outsider", async () => {
+        as("member-1", "member@firm.example");
+        expect((await putLogo(PNG)).status).toBe(403);
+        expect(
+            (await request(app).delete("/orgs/org-1/logo").set(...AUTH)).status,
+        ).toBe(403);
+
+        as("stranger-1", "stranger@elsewhere.example");
+        expect((await putLogo(PNG)).status).toBe(404);
+        expect((await getLogo()).status).toBe(404);
+        expect(tables.org_logos).toEqual([]);
+    });
+
+    it("accepts only a real PNG, JPEG or WebP", async () => {
+        const svg = `data:image/svg+xml;base64,${Buffer.from(
+            "<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+        ).toString("base64")}`;
+        // Says PNG; is not one.
+        const disguised = dataUrl("image/png", [...Buffer.from("<svg onload=alert(1)>")]);
+
+        for (const image of [
+            svg,
+            disguised,
+            "data:image/png;base64,",
+            "https://example.com/logo.png",
+            "not a data url",
+            undefined,
+            42,
+        ]) {
+            const res = await putLogo(image);
+            expect([image, res.status]).toEqual([image, 400]);
+        }
+        expect(tables.org_logos).toEqual([]);
+        expect(tables.audit_events).toEqual([]);
+    });
+
+    it("refuses an image over the size an organization may store", async () => {
+        const big = dataUrl("image/png", [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            ...new Array(512 * 1024).fill(7),
+        ]);
+
+        const res = await putLogo(big);
+
+        expect(res.status).toBe(400);
+        expect(res.body.detail).toMatch(/too large/);
+        expect(tables.org_logos).toEqual([]);
+    });
+
+    it("removes the logo, and says nothing in the audit trail when there was none", async () => {
+        await putLogo(PNG);
+
+        const removed = await request(app)
+            .delete("/orgs/org-1/logo")
+            .set(...AUTH);
+        expect(removed.status).toBe(200);
+        expect(removed.body).toEqual({ logo_updated_at: null });
+        expect(tables.org_logos).toEqual([]);
+        expect((await getLogo()).status).toBe(404);
+
+        const again = await request(app)
+            .delete("/orgs/org-1/logo")
+            .set(...AUTH);
+        expect(again.status).toBe(200);
+        expect(tables.audit_events.map((event) => event.action)).toEqual([
+            "org.logo.updated",
+            "org.logo.removed",
+        ]);
+    });
+});
+
 describe("sendOrgFailure db_error", () => {
     it("answers a generic 500 instead of forwarding the Postgres message", async () => {
         const consoleError = vi
