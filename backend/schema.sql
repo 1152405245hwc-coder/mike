@@ -904,6 +904,104 @@ alter table public.project_org_access_overrides enable row level security;
 --
 -- Returns null when the caller has no access at all, which is how the list
 -- RPCs' visibility predicates and this column stay consistent with each other.
+-- ---------------------------------------------------------------------------
+-- An organization's item with no Owner left
+-- ---------------------------------------------------------------------------
+-- A private project or workflow belongs to its creator and to the people it
+-- was shared with: the organization's owners have no standing on it of their
+-- own. They take it over only once it has no Owner left among the
+-- organization's current members -- its creator has left (or their account is
+-- gone) and nobody else was made an Owner -- so that a firm never loses a
+-- matter, and removing a member never has to wait on them.
+--
+-- Override rows reference org_members and go with the membership, so any
+-- 'owner' override found belongs to a current member.
+create or replace function public.project_is_ownerless(
+  p_project_id uuid,
+  p_project_user_id uuid,
+  p_org_id uuid
+)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select p_org_id is not null
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = p_project_user_id
+    )
+    and not exists (
+      select 1 from public.project_org_access_overrides o
+      where o.project_id = p_project_id and o.role = 'owner'
+    );
+$$;
+
+create or replace function public.workflow_is_ownerless(
+  p_workflow_id uuid,
+  p_workflow_user_id uuid,
+  p_org_id uuid
+)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select p_org_id is not null
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = p_workflow_user_id
+    )
+    and not exists (
+      select 1 from public.workflow_org_access_overrides o
+      where o.workflow_id = p_workflow_id and o.role = 'owner'
+    );
+$$;
+
+-- The same question for the backend, which holds an id rather than a row.
+create or replace function public.org_item_is_ownerless(
+  p_kind text,
+  p_item_id uuid
+)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select case p_kind
+    when 'project' then coalesce((
+      select public.project_is_ownerless(p.id, p.user_id, p.org_id)
+      from public.projects p where p.id = p_item_id
+    ), false)
+    when 'workflow' then coalesce((
+      select public.workflow_is_ownerless(w.id, w.user_id, w.org_id)
+      from public.workflows w where w.id = p_item_id
+    ), false)
+    else false
+  end;
+$$;
+
+-- Every private item without an Owner in the given organizations, for the
+-- backend's list filters. Normally empty or close to it.
+create or replace function public.ownerless_org_item_ids(p_org_ids uuid[])
+returns table (kind text, item_id uuid)
+language sql
+stable
+set search_path = public
+as $$
+  select 'project'::text, p.id
+  from public.projects p
+  where p.org_id = any(p_org_ids)
+    and p.visibility <> 'organization'
+    and public.project_is_ownerless(p.id, p.user_id, p.org_id)
+  union all
+  select 'workflow'::text, w.id
+  from public.workflows w
+  where w.org_id = any(p_org_ids)
+    and w.visibility <> 'organization'
+    and public.workflow_is_ownerless(w.id, w.user_id, w.org_id);
+$$;
+
 create or replace function public.project_access_role(
   p_project_id uuid,
   p_project_user_id uuid,
@@ -920,7 +1018,17 @@ as $$
     when p_org_id is not null then (
       select case
         when p_project_user_id::text = p_user_id then 'owner'
-        when m.role = 'owner' then 'owner'
+        -- An organization owner owns what is public, and what has no Owner
+        -- left. A private item with an Owner is not theirs unless shared.
+        when m.role = 'owner' and (
+          (
+            select project.visibility from public.projects project
+            where project.id = p_project_id
+          ) = 'organization'
+          or public.project_is_ownerless(
+            p_project_id, p_project_user_id, p_org_id
+          )
+        ) then 'owner'
         when o.role = 'deny' then null
         when o.role in ('owner', 'editor', 'viewer') then o.role
         when (
@@ -952,7 +1060,7 @@ $$;
 -- ---------------------------------------------------------------------------
 --   'organization'  public: every member of its organization
 --   'shared'        shared with at least one other person
---   'private'       its creator only (and, in an organization, its owners)
+--   'private'       its creator only
 -- A 'deny' is not sharing, so it does not make an item 'shared'.
 create or replace function public.project_access_scope(
   p_project_id uuid,
@@ -1387,7 +1495,16 @@ as $$
     when p_org_id is not null then (
       select case
         when p_workflow_user_id::text = p_user_id then 'owner'
-        when m.role = 'owner' then 'owner'
+        -- As for projects: public, or left without an Owner.
+        when m.role = 'owner' and (
+          (
+            select workflow.visibility from public.workflows workflow
+            where workflow.id = p_workflow_id
+          ) = 'organization'
+          or public.workflow_is_ownerless(
+            p_workflow_id, p_workflow_user_id, p_org_id
+          )
+        ) then 'owner'
         when o.role = 'deny' then null
         when o.role in ('owner', 'editor', 'viewer') then o.role
         when (
@@ -2755,6 +2872,22 @@ grant execute on function public.chat_access_role(uuid, uuid, uuid, uuid, text, 
 grant execute on function public.review_access_role(uuid, uuid, uuid, uuid, text, text)
   to service_role;
 grant execute on function public.workflow_access_role(uuid, uuid, uuid, text, text)
+  to service_role;
+revoke all on function public.project_is_ownerless(uuid, uuid, uuid)
+  from public, anon, authenticated;
+revoke all on function public.workflow_is_ownerless(uuid, uuid, uuid)
+  from public, anon, authenticated;
+revoke all on function public.org_item_is_ownerless(text, uuid)
+  from public, anon, authenticated;
+revoke all on function public.ownerless_org_item_ids(uuid[])
+  from public, anon, authenticated;
+grant execute on function public.project_is_ownerless(uuid, uuid, uuid)
+  to service_role;
+grant execute on function public.workflow_is_ownerless(uuid, uuid, uuid)
+  to service_role;
+grant execute on function public.org_item_is_ownerless(text, uuid)
+  to service_role;
+grant execute on function public.ownerless_org_item_ids(uuid[])
   to service_role;
 
 create or replace function public.get_projects_overview(
@@ -6745,14 +6878,17 @@ set search_path = public
 as $$
 declare resource_org_id uuid;
 declare resource_creator_id uuid;
+declare resource_visibility text;
 declare member_role text;
 begin
   case tg_table_name
     when 'project_org_access_overrides' then
-      select p.org_id, p.user_id into resource_org_id, resource_creator_id
+      select p.org_id, p.user_id, p.visibility
+        into resource_org_id, resource_creator_id, resource_visibility
       from public.projects p where p.id = new.project_id for update;
     when 'workflow_org_access_overrides' then
-      select w.org_id, w.user_id into resource_org_id, resource_creator_id
+      select w.org_id, w.user_id, w.visibility
+        into resource_org_id, resource_creator_id, resource_visibility
       from public.workflows w where w.id = new.workflow_id for update;
     else
       raise exception 'Unsupported organization override table';
@@ -6774,8 +6910,11 @@ begin
     raise exception 'Organization access overrides require active membership'
       using errcode = '23514';
   end if;
-  if member_role = 'owner' then
-    raise exception 'Organization owners always have owner access'
+  -- An organization owner owns every public item, so there is nothing to
+  -- give or deny them there. A private item is not theirs unless shared, so
+  -- there they are given a role like any other member.
+  if member_role = 'owner' and resource_visibility = 'organization' then
+    raise exception 'Organization owners always own a public item'
       using errcode = '23514';
   end if;
   return new;
@@ -6789,10 +6928,12 @@ create trigger workflow_org_access_overrides_guard before insert or update
   on public.workflow_org_access_overrides for each row
   execute procedure public.validate_org_access_override();
 
--- An organization Owner's Owner access is implicit and immutable. Remove any
--- former override when somebody is promoted to owner so management UIs never
--- present it as an editable assignment. An admin has no standing of their own
--- on content, so theirs is kept: a wall must survive a promotion to admin.
+-- An organization Owner owns every PUBLIC item, implicitly and immutably.
+-- Remove any former override on one when somebody is promoted to owner, so
+-- management UIs never present it as an editable assignment. Their roles on
+-- private items are kept: those are not theirs by office, and a promotion
+-- must not cost them a matter they were working on. An admin has no standing
+-- of their own on content, so theirs is kept everywhere.
 create or replace function public.cleanup_org_admin_access_overrides()
 returns trigger
 language plpgsql
@@ -6800,10 +6941,14 @@ set search_path = public
 as $$
 begin
   if new.role = 'owner' then
-    delete from public.project_org_access_overrides
-    where org_id = new.org_id and user_id = new.user_id;
-    delete from public.workflow_org_access_overrides
-    where org_id = new.org_id and user_id = new.user_id;
+    delete from public.project_org_access_overrides o
+    using public.projects p
+    where o.org_id = new.org_id and o.user_id = new.user_id
+      and p.id = o.project_id and p.visibility = 'organization';
+    delete from public.workflow_org_access_overrides o
+    using public.workflows w
+    where o.org_id = new.org_id and o.user_id = new.user_id
+      and w.id = o.workflow_id and w.visibility = 'organization';
   end if;
   return new;
 end;
@@ -6814,59 +6959,9 @@ create trigger org_members_cleanup_admin_overrides
   after insert or update of role on public.org_members
   for each row execute procedure public.cleanup_org_admin_access_overrides();
 
-create or replace function public.org_member_protect_resource_ownership()
-returns trigger
-language plpgsql
-set search_path = public
-as $$
-begin
-  perform 1 from public.organizations where id = old.org_id for update;
-  if not found then return old; end if;
-
-  if exists (
-    select 1 from public.projects p
-    where p.org_id = old.org_id
-      and public.project_access_role(
-        p.id, p.user_id, p.org_id, old.user_id::text, null
-      ) = 'owner'
-      and not exists (
-        select 1 from public.org_members other_member
-        where other_member.org_id = p.org_id
-          and other_member.user_id <> old.user_id
-          and public.project_access_role(
-            p.id, p.user_id, p.org_id, other_member.user_id::text, null
-          ) = 'owner'
-      )
-  ) then
-    raise exception 'Transfer ownership of organization projects before removing this member'
-      using errcode = '23514';
-  end if;
-
-  if exists (
-    select 1 from public.workflows w
-    where w.org_id = old.org_id
-      and public.workflow_access_role(
-        w.id, w.user_id, w.org_id, old.user_id::text, null
-      ) = 'owner'
-      and not exists (
-        select 1 from public.org_members other_member
-        where other_member.org_id = w.org_id
-          and other_member.user_id <> old.user_id
-          and public.workflow_access_role(
-            w.id, w.user_id, w.org_id, other_member.user_id::text, null
-          ) = 'owner'
-      )
-  ) then
-    raise exception 'Transfer ownership of organization workflows before removing this member'
-      using errcode = '23514';
-  end if;
-  return old;
-end;
-$$;
-
-create trigger org_members_resource_owner_guard before delete
-  on public.org_members for each row
-  execute procedure public.org_member_protect_resource_ownership();
+-- A member leaving or being removed never waits on a hand-over: whatever
+-- they alone owned passes to the organization's owners the moment they are
+-- gone (project_is_ownerless / workflow_is_ownerless).
 
 create or replace function public.cleanup_removed_org_member_overrides()
 returns trigger
@@ -7950,5 +8045,6 @@ insert into public.schema_migrations (filename) values
   ('20261011_03_org_private_by_default.sql'),
   ('20261012_01_public_private_list_scopes.sql'),
   ('20261012_02_org_api_keys.sql'),
-  ('20261012_03_org_router_models.sql')
+  ('20261012_03_org_router_models.sql'),
+  ('20261012_04_org_owner_private_access.sql')
 on conflict (filename) do nothing;

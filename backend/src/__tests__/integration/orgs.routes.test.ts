@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
+import { ownerlessRpcResult } from "../helpers/ownerlessRpc";
 
 // ---------------------------------------------------------------------------
 // Organizations, invitations and project organization overrides, over HTTP.
@@ -243,6 +244,9 @@ vi.mock("../../lib/supabase", () => ({
     createServerSupabase: vi.fn(() => ({
         from: (t: string) => query(t),
         rpc: vi.fn((name?: string, args?: Record<string, unknown>) => {
+            // Whether an item has an Owner left is the database's to say.
+            const ownerless = ownerlessRpcResult(tables, name ?? "", args);
+            if (ownerless) return Promise.resolve(ownerless);
             // The one function these routes rely on for its effect: replace
             // an organization's model list for one provider.
             if (name === "replace_org_router_models" && args) {
@@ -782,9 +786,9 @@ describe("project organization overrides over HTTP", () => {
         });
     };
 
-    it("does not allow an organization owner to be overridden", async () => {
-        // An owner can open every project in the organization; that is what
-        // stops a matter being orphaned, so it cannot be taken away here.
+    it("does not allow an organization owner to be overridden on a public project", async () => {
+        // An organization owner owns every public project, so there is
+        // nothing to give them there and nothing that can be taken away.
         addColleague("owner");
 
         const res = await request(app)
@@ -794,9 +798,30 @@ describe("project organization overrides over HTTP", () => {
 
         expect(res.status).toBe(400);
         expect(res.body.detail).toBe(
-            "Organization owners always have owner access",
+            "Organization owners always own a public item",
         );
         expect(tables.project_org_access_overrides).toEqual([]);
+    });
+
+    it("shares a private project with an organization owner like any other member", async () => {
+        // A private project is not an organization owner's by office, so
+        // its creator gives them a role the way they would anyone.
+        addColleague("owner");
+        tables.projects[0].visibility = "private";
+
+        const res = await request(app)
+            .post("/projects/proj-1/access")
+            .set(...AUTH)
+            .send({ email: "partner@firm.example", role: "viewer" });
+
+        expect(res.status).toBe(201);
+        expect(tables.project_org_access_overrides).toEqual([
+            expect.objectContaining({
+                project_id: "proj-1",
+                user_id: "admin-2",
+                role: "viewer",
+            }),
+        ]);
     });
 
     it("walls an organization admin off a project like any other member", async () => {
@@ -1058,27 +1083,66 @@ describe("project visibility over HTTP", () => {
         expect(tables.projects[0].visibility).toBe("private");
     });
 
-    it("keeps the organization's owners in, whatever the setting", async () => {
-        // A second owner who did not create the project and was never
-        // shared it: that is what stops a matter being orphaned.
-        tables.org_members.push({
-            id: "m-3",
-            org_id: "org-1",
-            user_id: "owner-2",
-            role: "owner",
-            created_at: "t3",
+    describe("a second organization owner, who did not create the project and was never shared it", () => {
+        beforeEach(() => {
+            tables.org_members.push({
+                id: "m-3",
+                org_id: "org-1",
+                user_id: "owner-2",
+                role: "owner",
+                created_at: "t3",
+            });
+            tables.user_profiles.push({
+                user_id: "owner-2",
+                email: "partner@firm.example",
+                display_name: "Pat",
+            });
         });
-        tables.user_profiles.push({
-            user_id: "owner-2",
-            email: "partner@firm.example",
-            display_name: "Pat",
-        });
-        await setVisibility("private");
+        const openAsSecondOwner = async () => {
+            as("owner-2", "partner@firm.example");
+            const res = await request(app).get("/projects/proj-1").set(...AUTH);
+            as("owner-1", "owner@firm.example");
+            return res;
+        };
 
-        as("owner-2", "partner@firm.example");
-        const res = await request(app).get("/projects/proj-1").set(...AUTH);
-        expect(res.status).toBe(200);
-        expect(res.body.access_role).toBe("owner");
+        it("is an Owner of it while it is public", async () => {
+            const res = await openAsSecondOwner();
+            expect(res.status).toBe(200);
+            expect(res.body.access_role).toBe("owner");
+        });
+
+        it("cannot open it once it is private", async () => {
+            // Private is private: owning the organization is not a key to a
+            // colleague's matter.
+            await setVisibility("private");
+            expect((await openAsSecondOwner()).status).toBe(404);
+        });
+
+        it("takes it over when its creator leaves and no Owner is left", async () => {
+            await setVisibility("private");
+            tables.org_members = tables.org_members.filter(
+                (membership) => membership.user_id !== "owner-1",
+            );
+
+            const res = await openAsSecondOwner();
+            expect(res.status).toBe(200);
+            expect(res.body.access_role).toBe("owner");
+        });
+
+        it("does not take it over while another member is still an Owner of it", async () => {
+            await setVisibility("private");
+            tables.project_org_access_overrides.push({
+                project_id: "proj-1",
+                org_id: "org-1",
+                user_id: "member-1",
+                role: "owner",
+            });
+            tables.org_members = tables.org_members.filter(
+                (membership) => membership.user_id !== "owner-1",
+            );
+
+            expect((await openAsSecondOwner()).status).toBe(404);
+        });
     });
 });
 
