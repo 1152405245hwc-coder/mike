@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { ownerlessRpcResult } from "../helpers/ownerlessRpc";
 
 // ---------------------------------------------------------------------------
@@ -336,11 +338,96 @@ describe("GET /orgs", () => {
         ]);
     });
 
-    it("is empty for someone in no organization — there is no personal org", async () => {
+    it("is empty for someone in no organization", async () => {
         as("loner", "loner@example.com");
         const res = await request(app).get("/orgs").set(...AUTH);
         expect(res.status).toBe(200);
         expect(res.body).toEqual([]);
+    });
+});
+
+// Every account has an organization of its own, behind the scenes. Over HTTP
+// it is not an organization at all: not listed, and every route that names
+// one answers for it as for an id that names nothing — to its owner too.
+describe("a personal organization", () => {
+    beforeEach(() => {
+        tables.organizations.push({
+            id: "mine",
+            name: "Personal",
+            kind: "personal",
+            personal_user_id: "owner-1",
+            created_by: "owner-1",
+        });
+        tables.org_members.push({
+            id: "m-mine",
+            org_id: "mine",
+            user_id: "owner-1",
+            role: "owner",
+            created_at: "t0",
+        });
+    });
+
+    it("is not among the caller's organizations", async () => {
+        const res = await request(app).get("/orgs").set(...AUTH);
+        expect(res.status).toBe(200);
+        expect(res.body.map((org: { id: string }) => org.id)).toEqual([
+            "org-1",
+        ]);
+    });
+
+    it.each([
+        ["get", "/orgs/mine", undefined],
+        ["patch", "/orgs/mine", { name: "Mine, renamed" }],
+        ["delete", "/orgs/mine", undefined],
+        ["get", "/orgs/mine/logo", undefined],
+        ["put", "/orgs/mine/logo", { data_url: "data:image/png;base64,AAAA" }],
+        ["delete", "/orgs/mine/logo", undefined],
+        ["get", "/orgs/mine/resources", undefined],
+        ["get", "/orgs/mine/members", undefined],
+        ["patch", "/orgs/mine/members/owner-1", { role: "member" }],
+        ["delete", "/orgs/mine/members/owner-1", undefined],
+        ["post", "/orgs/mine/invitations", { email: "friend@example.com" }],
+        ["get", "/orgs/mine/invitations", undefined],
+        ["delete", "/orgs/mine/invitations/inv-1", undefined],
+        ["post", "/orgs/mine/invitations/inv-1/resend", undefined],
+        ["get", "/orgs/mine/api-keys", undefined],
+        ["put", "/orgs/mine/api-keys/policy", { allow_personal: false }],
+        ["put", "/orgs/mine/api-keys/openrouter/models", { models: [] }],
+        ["put", "/orgs/mine/api-keys/openai", { api_key: "sk-test" }],
+        ["patch", "/orgs/mine/api-keys/openai", { enabled: false }],
+    ] as const)("%s %s answers 404, to its owner too", async (method, path, body) => {
+        const before = JSON.stringify(tables);
+        const pending = request(app)[method](path).set(...AUTH);
+        const res = await (body ? pending.send(body) : pending);
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ detail: "Organization not found" });
+        // Nothing was renamed, removed, invited or saved on the way.
+        expect(JSON.stringify(tables)).toBe(before);
+    });
+
+    it("is refused by every route that names an organization, including ones added later", () => {
+        // The cases above are the routes that exist today. This reads the
+        // router itself, so a new /:orgId route cannot be added without the
+        // guard: each must use requireOrgAuth, never requireAuth alone.
+        const source = readFileSync(
+            resolve(__dirname, "../../modules/orgs/orgs.routes.ts"),
+            "utf8",
+        );
+        const routes = [
+            ...source.matchAll(
+                /orgsRouter\.(?:get|post|put|patch|delete)\(\s*"(\/:orgId[^"]*)",\s*(\w+),/g,
+            ),
+        ].map(([, path, guard]) => ({ path, guard }));
+        expect(routes.length).toBeGreaterThanOrEqual(19);
+        expect(routes.filter((route) => route.guard !== "requireOrgAuth")).toEqual(
+            [],
+        );
+    });
+
+    it("leaves a team organization's routes as they were", async () => {
+        const res = await request(app).get("/orgs/org-1").set(...AUTH);
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ id: "org-1", role: "owner" });
     });
 });
 

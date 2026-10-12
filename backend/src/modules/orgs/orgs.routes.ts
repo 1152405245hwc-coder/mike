@@ -10,11 +10,12 @@
 // admin can never pull somebody into a workspace full of confidential
 // material without them agreeing to it.
 
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../../middleware/auth";
 import { asyncRoute, routerErrorHandler } from "../../middleware/asyncRoute";
 import { createServerSupabase } from "../../lib/supabase";
 import { sendOrgFailure } from "../../lib/orgFailure";
+import { isPersonalOrg } from "../../lib/personalOrgs";
 import {
     listMyOrgs,
     createOrg,
@@ -43,6 +44,22 @@ import { normalizeApiKeyProvider } from "../user/user.service";
 
 export const orgsRouter = Router();
 
+// A person's own organization is behind the scenes: it has no settings,
+// roster, invitations, keys or logo to reach, and it is neither renamed nor
+// deleted. Every route that names an organization answers for it exactly as
+// it does for one that is not there.
+function refusePersonalOrg(req: Request, res: Response, next: NextFunction) {
+    isPersonalOrg(createServerSupabase(), String(req.params.orgId)).then(
+        (personal) => {
+            if (personal)
+                return sendOrgFailure(res, { ok: false, kind: "not_found" });
+            next();
+        },
+        next,
+    );
+}
+const requireOrgAuth = [requireAuth, refusePersonalOrg];
+
 // GET /orgs — orgs the caller belongs to (with their role + member count).
 orgsRouter.get("/", requireAuth, asyncRoute(async (_req, res) => {
     const userId = res.locals.userId as string;
@@ -62,7 +79,7 @@ orgsRouter.post("/", requireAuth, asyncRoute(async (req, res) => {
 }));
 
 // GET /orgs/:orgId — org detail (any member).
-orgsRouter.get("/:orgId", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.get("/:orgId", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await getOrg(db, { userId, orgId: req.params.orgId });
@@ -71,7 +88,7 @@ orgsRouter.get("/:orgId", requireAuth, asyncRoute(async (req, res) => {
 }));
 
 // PATCH /orgs/:orgId — rename the org (admin only).
-orgsRouter.patch("/:orgId", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.patch("/:orgId", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await updateOrg(db, {
@@ -85,7 +102,7 @@ orgsRouter.patch("/:orgId", requireAuth, asyncRoute(async (req, res) => {
 
 // GET /orgs/:orgId/logo — the organization's logo, as a data URL (any
 // member). 404 when it has none.
-orgsRouter.get("/:orgId/logo", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.get("/:orgId/logo", requireOrgAuth, asyncRoute(async (req, res) => {
     const db = createServerSupabase();
     const result = await getOrgLogo(db, {
         userId: res.locals.userId as string,
@@ -97,7 +114,7 @@ orgsRouter.get("/:orgId/logo", requireAuth, asyncRoute(async (req, res) => {
 
 // PUT /orgs/:orgId/logo — set or replace the logo (owner or admin). The body
 // carries the image as a PNG, JPEG or WebP data URL.
-orgsRouter.put("/:orgId/logo", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.put("/:orgId/logo", requireOrgAuth, asyncRoute(async (req, res) => {
     const db = createServerSupabase();
     const result = await saveOrgLogo(db, {
         actorId: res.locals.userId as string,
@@ -110,7 +127,7 @@ orgsRouter.put("/:orgId/logo", requireAuth, asyncRoute(async (req, res) => {
 }));
 
 // DELETE /orgs/:orgId/logo — remove the logo (owner or admin).
-orgsRouter.delete("/:orgId/logo", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.delete("/:orgId/logo", requireOrgAuth, asyncRoute(async (req, res) => {
     const db = createServerSupabase();
     const result = await removeOrgLogo(db, {
         actorId: res.locals.userId as string,
@@ -123,7 +140,7 @@ orgsRouter.delete("/:orgId/logo", requireAuth, asyncRoute(async (req, res) => {
 
 // DELETE /orgs/:orgId — delete an empty org (admin only). Organization-owned
 // resources never become personal data as a side effect of deletion.
-orgsRouter.delete("/:orgId", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.delete("/:orgId", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await deleteOrg(db, {
@@ -138,7 +155,7 @@ orgsRouter.delete("/:orgId", requireAuth, asyncRoute(async (req, res) => {
 // GET /orgs/:orgId/resources — every organization-scoped project and workflow.
 // Chats and tabular reviews only inherit organization access from projects and
 // are browsed inside those projects rather than as independent org resources.
-orgsRouter.get("/:orgId/resources", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.get("/:orgId/resources", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await listOrgResources(db, {
@@ -153,7 +170,7 @@ orgsRouter.get("/:orgId/resources", requireAuth, asyncRoute(async (req, res) => 
 }));
 
 // GET /orgs/:orgId/members — the accepted roster (any member).
-orgsRouter.get("/:orgId/members", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.get("/:orgId/members", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await listMembers(db, { userId, orgId: req.params.orgId });
@@ -162,7 +179,7 @@ orgsRouter.get("/:orgId/members", requireAuth, asyncRoute(async (req, res) => {
 }));
 
 // PATCH /orgs/:orgId/members/:userId — change a member's role (admin only).
-orgsRouter.patch("/:orgId/members/:userId", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.patch("/:orgId/members/:userId", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await updateMember(db, {
@@ -177,7 +194,7 @@ orgsRouter.patch("/:orgId/members/:userId", requireAuth, asyncRoute(async (req, 
 }));
 
 // DELETE /orgs/:orgId/members/:userId — remove a member (admin, or self).
-orgsRouter.delete("/:orgId/members/:userId", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.delete("/:orgId/members/:userId", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await removeMember(db, {
@@ -195,7 +212,7 @@ orgsRouter.delete("/:orgId/members/:userId", requireAuth, asyncRoute(async (req,
 // ---------------------------------------------------------------------------
 
 // POST /orgs/:orgId/invitations — invite an email at a role (admin only).
-orgsRouter.post("/:orgId/invitations", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.post("/:orgId/invitations", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const db = createServerSupabase();
@@ -211,7 +228,7 @@ orgsRouter.post("/:orgId/invitations", requireAuth, asyncRoute(async (req, res) 
 }));
 
 // GET /orgs/:orgId/invitations — pending/recent invitations (admin only).
-orgsRouter.get("/:orgId/invitations", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.get("/:orgId/invitations", requireOrgAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
     const result = await listInvitations(db, {
@@ -225,7 +242,7 @@ orgsRouter.get("/:orgId/invitations", requireAuth, asyncRoute(async (req, res) =
 // DELETE /orgs/:orgId/invitations/:invitationId — cancel (admin only).
 orgsRouter.delete(
     "/:orgId/invitations/:invitationId",
-    requireAuth,
+    requireOrgAuth,
     asyncRoute(async (req, res) => {
         const userId = res.locals.userId as string;
         const userEmail = res.locals.userEmail as string | undefined;
@@ -249,7 +266,7 @@ orgsRouter.delete(
 // mean adding a dependency this PR deliberately does not take on.
 orgsRouter.post(
     "/:orgId/invitations/:invitationId/resend",
-    requireAuth,
+    requireOrgAuth,
     asyncRoute(async (req, res) => {
         const userId = res.locals.userId as string;
         const userEmail = res.locals.userEmail as string | undefined;
@@ -274,7 +291,7 @@ orgsRouter.post(
 
 // GET /orgs/:orgId/api-keys — which providers are set up (any member).
 // Reports configuration only; a saved key is never sent back.
-orgsRouter.get("/:orgId/api-keys", requireAuth, asyncRoute(async (req, res) => {
+orgsRouter.get("/:orgId/api-keys", requireOrgAuth, asyncRoute(async (req, res) => {
     const db = createServerSupabase();
     const result = await getOrgApiKeySettings(db, {
         userId: res.locals.userId as string,
@@ -289,7 +306,7 @@ orgsRouter.get("/:orgId/api-keys", requireAuth, asyncRoute(async (req, res) => {
 // Declared before /:provider so "policy" is never read as a provider name.
 orgsRouter.put(
     "/:orgId/api-keys/policy",
-    requireAuth,
+    requireOrgAuth,
     requireMfaIfEnrolled,
     asyncRoute(async (req, res) => {
         const db = createServerSupabase();
@@ -309,7 +326,7 @@ orgsRouter.put(
 // is replaced; an empty one removes them all.
 orgsRouter.put(
     "/:orgId/api-keys/:provider/models",
-    requireAuth,
+    requireOrgAuth,
     requireMfaIfEnrolled,
     asyncRoute(async (req, res) => {
         const provider = normalizeOrgRouterSlug(req.params.provider);
@@ -334,7 +351,7 @@ orgsRouter.put(
 // no settings) remove the organization's key (owner or admin).
 orgsRouter.put(
     "/:orgId/api-keys/:provider",
-    requireAuth,
+    requireOrgAuth,
     requireMfaIfEnrolled,
     asyncRoute(async (req, res) => {
         const provider = normalizeApiKeyProvider(req.params.provider);
@@ -362,7 +379,7 @@ orgsRouter.put(
 // off or on for the organization (owner or admin).
 orgsRouter.patch(
     "/:orgId/api-keys/:provider",
-    requireAuth,
+    requireOrgAuth,
     requireMfaIfEnrolled,
     asyncRoute(async (req, res) => {
         const provider = normalizeApiKeyProvider(req.params.provider);

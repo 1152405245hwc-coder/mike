@@ -85,6 +85,9 @@ create unique index if not exists user_profiles_email_lower_unique
 create index if not exists idx_user_profiles_email
   on public.user_profiles(email);
 
+-- The profile, then the account's personal organization
+-- (ensure_personal_organization, defined with organizations below). Each in
+-- a block of its own: neither may block sign-up, nor undo the other.
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -92,37 +95,45 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.user_profiles (
-    user_id,
-    email,
-    display_name,
-    organisation
-  )
-  values (
-    new.id,
-    lower(new.email),
-    nullif(left(btrim(coalesce(
-      new.raw_user_meta_data ->> 'display_name',
-      new.raw_user_meta_data ->> 'full_name',
-      new.raw_user_meta_data ->> 'name',
-      ''
-    )), 200), ''),
-    nullif(left(btrim(coalesce(new.raw_user_meta_data ->> 'organisation', '')), 200), '')
-  )
-  on conflict (user_id) do update
-    set email = excluded.email,
-        display_name = coalesce(
-          nullif(btrim(user_profiles.display_name), ''),
-          excluded.display_name
-        ),
-        organisation = coalesce(
-          nullif(btrim(user_profiles.organisation), ''),
-          excluded.organisation
-        ),
-        updated_at = now();
-  return new;
-exception when others then
-  -- Never block signup if the profile insert fails.
+  begin
+    insert into public.user_profiles (
+      user_id,
+      email,
+      display_name,
+      organisation
+    )
+    values (
+      new.id,
+      lower(new.email),
+      nullif(left(btrim(coalesce(
+        new.raw_user_meta_data ->> 'display_name',
+        new.raw_user_meta_data ->> 'full_name',
+        new.raw_user_meta_data ->> 'name',
+        ''
+      )), 200), ''),
+      nullif(left(btrim(coalesce(new.raw_user_meta_data ->> 'organisation', '')), 200), '')
+    )
+    on conflict (user_id) do update
+      set email = excluded.email,
+          display_name = coalesce(
+            nullif(btrim(user_profiles.display_name), ''),
+            excluded.display_name
+          ),
+          organisation = coalesce(
+            nullif(btrim(user_profiles.organisation), ''),
+            excluded.organisation
+          ),
+          updated_at = now();
+  exception when others then
+    -- Never block signup if the profile insert fails.
+    null;
+  end;
+  begin
+    perform public.ensure_personal_organization(new.id);
+  exception when others then
+    -- Nor if this does: the backend creates a missing one when it needs it.
+    null;
+  end;
   return new;
 end;
 $$;
@@ -337,10 +348,12 @@ alter table public.auth_handoff_tickets enable row level security;
 -- owner/admin/member enforcement. SSO/SAML/SCIM are intentional extension points
 -- (future organizations.sso_config / scim_token).
 --
--- Personal content is simply `org_id is null`. There is no hidden personal
--- organization: an extra org row and owner-membership per account bought
--- nothing that `user_id` did not already anchor, while making every query
--- carry a tenant that existed only to be ignored.
+-- Two kinds. A 'team' organization is the one people create, name and invite
+-- each other into. A 'personal' one is each person's own: made with their
+-- account, holding them alone, as its owner, and never shown as an
+-- organization — to its owner it is "Personal". It exists so that all work
+-- can come to belong to an organization; until that move is made, personal
+-- content is still `org_id is null`.
 -- ---------------------------------------------------------------------------
 
 create table if not exists public.organizations (
@@ -354,9 +367,21 @@ create table if not exists public.organizations (
   -- Kept in step by a trigger on org_logos; clients read it to know whether
   -- there is a logo and when to fetch it again.
   logo_updated_at timestamptz,
+  kind text not null default 'team'
+    constraint organizations_kind_check check (kind in ('team', 'personal')),
+  -- Whose personal organization this is; set exactly when it is one.
+  -- Deleting the account takes its personal organization with it.
+  personal_user_id uuid references auth.users(id) on delete cascade,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint organizations_personal_owner_check
+    check ((kind = 'personal') = (personal_user_id is not null))
 );
+
+-- One personal organization per person.
+create unique index if not exists organizations_personal_user_key
+  on public.organizations(personal_user_id)
+  where personal_user_id is not null;
 
 alter table public.organizations enable row level security;
 
@@ -474,6 +499,89 @@ create index if not exists idx_org_invitations_org
   on public.org_invitations(org_id);
 
 alter table public.org_invitations enable row level security;
+
+-- A personal organization has exactly one member: its owner, as owner. This
+-- is what "personal" means, so it is held here rather than left to callers.
+create or replace function public.org_members_guard_personal()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare owner_id uuid;
+begin
+  select o.personal_user_id into owner_id
+  from public.organizations o
+  where o.id = new.org_id and o.kind = 'personal';
+  if not found then
+    return new;
+  end if;
+  if new.user_id is distinct from owner_id or new.role <> 'owner' then
+    raise exception 'A personal organization belongs to one person only'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists org_members_personal_guard on public.org_members;
+create trigger org_members_personal_guard
+  before insert or update on public.org_members
+  for each row execute procedure public.org_members_guard_personal();
+
+-- Nobody is invited into one either.
+create or replace function public.org_invitations_guard_personal()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if exists (
+    select 1 from public.organizations o
+    where o.id = new.org_id and o.kind = 'personal'
+  ) then
+    raise exception 'A personal organization cannot have invitations'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists org_invitations_personal_guard on public.org_invitations;
+create trigger org_invitations_personal_guard
+  before insert or update of org_id on public.org_invitations
+  for each row execute procedure public.org_invitations_guard_personal();
+
+-- Create a person's personal organization if they do not have one, and
+-- return its id either way. Safe to call any number of times, and from two
+-- sessions at once: the unique index decides, and the loser reads the
+-- winner's row.
+create or replace function public.ensure_personal_organization(p_user_id uuid)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare org uuid;
+begin
+  select o.id into org from public.organizations o
+  where o.personal_user_id = p_user_id;
+  if org is null then
+    insert into public.organizations (name, created_by, kind, personal_user_id)
+    values ('Personal', p_user_id, 'personal', p_user_id)
+    on conflict (personal_user_id) where personal_user_id is not null
+    do nothing
+    returning id into org;
+    if org is null then
+      select o.id into org from public.organizations o
+      where o.personal_user_id = p_user_id;
+    end if;
+  end if;
+  insert into public.org_members (org_id, user_id, role)
+  values (org, p_user_id, 'owner')
+  on conflict (org_id, user_id) do nothing;
+  return org;
+end;
+$$;
 
 create table if not exists public.user_api_keys (
   id uuid primary key default gen_random_uuid(),
@@ -7202,6 +7310,13 @@ revoke all on function public.replace_user_router_models(uuid, text, text[])
   from public, anon, authenticated;
 revoke all on function public.replace_org_router_models(uuid, text, text[])
   from public, anon, authenticated;
+revoke all on function public.ensure_personal_organization(uuid)
+  from public, anon, authenticated;
+revoke all on function public.org_members_guard_personal()
+  from public, anon, authenticated;
+revoke all on function public.org_invitations_guard_personal()
+  from public, anon, authenticated;
+grant execute on function public.ensure_personal_organization(uuid) to service_role;
 revoke all on function public.sync_org_logo_updated_at()
   from public, anon, authenticated;
 revoke all on function public.begin_tabular_review_generation(uuid, timestamptz, uuid, integer)
@@ -8098,5 +8213,6 @@ insert into public.schema_migrations (filename) values
   ('20261012_02_org_api_keys.sql'),
   ('20261012_03_org_router_models.sql'),
   ('20261012_04_org_owner_private_access.sql'),
-  ('20261012_05_org_logos.sql')
+  ('20261012_05_org_logos.sql'),
+  ('20261012_06_personal_organizations.sql')
 on conflict (filename) do nothing;
