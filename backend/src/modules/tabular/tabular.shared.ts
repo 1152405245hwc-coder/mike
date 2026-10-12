@@ -190,6 +190,8 @@ export async function validateSelectedModel(
     model: unknown,
     userId: string,
     db: Db,
+    /** The review's organization, whose keys it then runs on. */
+    orgId?: string | null,
 ): Promise<ValidatedModel | ModelValidationFailure> {
     const requested = resolveModel(
         typeof model === "string" ? model.trim() : "",
@@ -232,7 +234,9 @@ export async function validateSelectedModel(
         throw error;
     }
 
-    const { api_keys: apiKeys } = await getUserModelSettings(userId, db);
+    const { api_keys: apiKeys } = await getUserModelSettings(userId, db, {
+        orgId,
+    });
     const missingKey = missingModelApiKey(selected, apiKeys);
     if (missingKey) {
         return {

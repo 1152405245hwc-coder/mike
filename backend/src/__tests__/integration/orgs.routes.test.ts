@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1058,246 @@ describe("project visibility over HTTP", () => {
 // ---------------------------------------------------------------------------
 // Internal failures do not narrate the database to the caller
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Organization provider keys
+// ---------------------------------------------------------------------------
+
+describe("organization provider keys", () => {
+    const SECRET = "sk-org-secret-value";
+    // Keys exported in the developer's shell (or CI) sit under every owner;
+    // these cases are about the organization's and the member's.
+    const ENV_KEYS = ["OPENAI_API_KEY", "MISTRAL_API_KEY"];
+    const savedEnv: Record<string, string | undefined> = {};
+
+    afterEach(() => {
+        for (const name of ENV_KEYS) {
+            if (savedEnv[name] === undefined) delete process.env[name];
+            else process.env[name] = savedEnv[name];
+        }
+    });
+
+    beforeEach(() => {
+        process.env.USER_API_KEYS_ENCRYPTION_SECRET = "test-secret";
+        for (const name of ENV_KEYS) {
+            savedEnv[name] = process.env[name];
+            delete process.env[name];
+        }
+        tables.organizations[0].allow_personal_api_keys = true;
+        tables.org_api_keys = [];
+        tables.user_api_keys = [];
+        tables.org_members.push({
+            id: "m-3",
+            org_id: "org-1",
+            user_id: "admin-1",
+            role: "admin",
+            created_at: "t3",
+        });
+    });
+
+    const saveKey = (provider = "openai", body: object = { api_key: SECRET }) =>
+        request(app)
+            .put(`/orgs/org-1/api-keys/${provider}`)
+            .set(...AUTH)
+            .send(body);
+
+    it("lets an owner save a key and never sends it back", async () => {
+        const res = await saveKey();
+
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({
+            keys: { openai: true, sources: { openai: "org" } },
+            effective: { openai: true, sources: { openai: "org" } },
+            allow_personal_api_keys: true,
+            can_manage: true,
+        });
+        expect(JSON.stringify(res.body)).not.toContain(SECRET);
+        expect(tables.org_api_keys).toHaveLength(1);
+        expect(tables.org_api_keys[0]).toMatchObject({
+            org_id: "org-1",
+            provider: "openai",
+            updated_by: "owner-1",
+        });
+        // Encrypted at rest, and absent from the audit trail.
+        expect(JSON.stringify(tables.org_api_keys)).not.toContain(SECRET);
+        expect(JSON.stringify(tables.audit_events)).not.toContain(SECRET);
+        expect(tables.audit_events).toEqual([
+            expect.objectContaining({ action: "org.api_key.saved" }),
+        ]);
+    });
+
+    it("lets an admin manage keys too", async () => {
+        as("admin-1", "admin@firm.example");
+        expect((await saveKey()).status).toBe(200);
+    });
+
+    it("refuses a plain member, on every write", async () => {
+        as("member-1", "member@firm.example");
+
+        expect((await saveKey()).status).toBe(403);
+        expect(
+            (
+                await request(app)
+                    .patch("/orgs/org-1/api-keys/openai")
+                    .set(...AUTH)
+                    .send({ enabled: false })
+            ).status,
+        ).toBe(403);
+        expect(
+            (
+                await request(app)
+                    .put("/orgs/org-1/api-keys/policy")
+                    .set(...AUTH)
+                    .send({ allow_personal_api_keys: false })
+            ).status,
+        ).toBe(403);
+        expect(tables.org_api_keys).toEqual([]);
+        expect(tables.organizations[0].allow_personal_api_keys).toBe(true);
+        expect(tables.audit_events).toEqual([]);
+    });
+
+    it("shows a member what is set up, without the right to change it", async () => {
+        await saveKey();
+        as("member-1", "member@firm.example");
+
+        const res = await request(app).get("/orgs/org-1/api-keys").set(...AUTH);
+
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({
+            keys: { openai: true },
+            effective: { openai: true, sources: { openai: "org" } },
+            can_manage: false,
+        });
+        expect(JSON.stringify(res.body)).not.toContain(SECRET);
+    });
+
+    it("hides the organization from somebody outside it", async () => {
+        await saveKey();
+        as("stranger-1", "stranger@elsewhere.example");
+
+        expect(
+            (await request(app).get("/orgs/org-1/api-keys").set(...AUTH)).status,
+        ).toBe(404);
+        expect((await saveKey("claude")).status).toBe(404);
+        expect(tables.org_api_keys).toHaveLength(1);
+    });
+
+    it("removes the key when saved empty", async () => {
+        await saveKey();
+
+        const res = await saveKey("openai", { api_key: null });
+
+        expect(res.status).toBe(200);
+        expect(res.body.keys.openai).toBe(false);
+        expect(tables.org_api_keys).toEqual([]);
+        expect(tables.audit_events.map((event) => event.action)).toEqual([
+            "org.api_key.saved",
+            "org.api_key.removed",
+        ]);
+    });
+
+    it("turns a provider off and on without losing the key", async () => {
+        await saveKey();
+
+        const off = await request(app)
+            .patch("/orgs/org-1/api-keys/openai")
+            .set(...AUTH)
+            .send({ enabled: false });
+        expect(off.status).toBe(200);
+        expect(off.body).toMatchObject({
+            keys: { openai: false, enabled: { openai: false } },
+            effective: { openai: false },
+        });
+        expect(tables.org_api_keys).toHaveLength(1);
+
+        const on = await request(app)
+            .patch("/orgs/org-1/api-keys/openai")
+            .set(...AUTH)
+            .send({ enabled: true });
+        expect(on.body).toMatchObject({ keys: { openai: true } });
+        expect(tables.audit_events.map((event) => event.action)).toEqual([
+            "org.api_key.saved",
+            "org.api_key.disabled",
+            "org.api_key.enabled",
+        ]);
+    });
+
+    it("cannot switch a provider the organization has no key for", async () => {
+        const res = await request(app)
+            .patch("/orgs/org-1/api-keys/openai")
+            .set(...AUTH)
+            .send({ enabled: false });
+        expect(res.status).toBe(409);
+    });
+
+    it("rejects an unknown provider and a malformed body", async () => {
+        expect((await saveKey("not-a-provider")).status).toBe(400);
+        expect(
+            (
+                await request(app)
+                    .patch("/orgs/org-1/api-keys/openai")
+                    .set(...AUTH)
+                    .send({ enabled: "no" })
+            ).status,
+        ).toBe(400);
+        expect(
+            (
+                await request(app)
+                    .put("/orgs/org-1/api-keys/policy")
+                    .set(...AUTH)
+                    .send({ allow_personal_api_keys: "no" })
+            ).status,
+        ).toBe(400);
+    });
+
+    it("reads \"policy\" as the setting, not as a provider", async () => {
+        const res = await request(app)
+            .put("/orgs/org-1/api-keys/policy")
+            .set(...AUTH)
+            .send({ allow_personal_api_keys: false });
+
+        expect(res.status).toBe(200);
+        expect(res.body.allow_personal_api_keys).toBe(false);
+        expect(tables.organizations[0].allow_personal_api_keys).toBe(false);
+        expect(tables.audit_events).toEqual([
+            expect.objectContaining({ action: "org.personal_api_keys.blocked" }),
+        ]);
+    });
+
+    it("takes a member's own key out of play once personal keys are blocked", async () => {
+        // The member has saved a key of their own for a provider the
+        // organization has none for.
+        tables.user_api_keys.push({
+            user_id: "member-1",
+            provider: "mistral",
+            enabled: true,
+            settings: {},
+        });
+        const asMember = async () => {
+            as("member-1", "member@firm.example");
+            const res = await request(app)
+                .get("/orgs/org-1/api-keys")
+                .set(...AUTH);
+            as("owner-1", "owner@firm.example");
+            return res.body.effective;
+        };
+
+        expect(await asMember()).toMatchObject({
+            mistral: true,
+            sources: { mistral: "user" },
+        });
+
+        await request(app)
+            .put("/orgs/org-1/api-keys/policy")
+            .set(...AUTH)
+            .send({ allow_personal_api_keys: false });
+
+        expect(await asMember()).toMatchObject({
+            mistral: false,
+            sources: { mistral: null },
+        });
+    });
+});
 
 describe("sendOrgFailure db_error", () => {
     it("answers a generic 500 instead of forwarding the Postgres message", async () => {

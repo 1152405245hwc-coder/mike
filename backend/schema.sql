@@ -347,6 +347,9 @@ create table if not exists public.organizations (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   created_by uuid references auth.users(id) on delete set null,
+  -- Whether work in this organization may run on a member's own provider
+  -- key when the organization has none for that provider (org_api_keys).
+  allow_personal_api_keys boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -491,6 +494,43 @@ create index if not exists idx_user_api_keys_user
   on public.user_api_keys(user_id);
 
 alter table public.user_api_keys enable row level security;
+
+-- Provider keys an organization holds for its members.
+--
+-- Work inside an organization runs on the organization's key for a provider
+-- when it has one: the firm pays for it and it is covered by the firm's own
+-- terms with the provider. The shape, encryption and `settings` companion
+-- are user_api_keys' exactly, so one store reads and writes both
+-- (modules/user/user.apiKeyStore.ts).
+--
+-- organizations.allow_personal_api_keys decides what happens for a provider
+-- the organization has no key for: when true (the default, and the behaviour
+-- before this table existed) a member's own key is used; when false, work in
+-- the organization never runs on a member's personal key.
+create table if not exists public.org_api_keys (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  provider text not null
+    constraint org_api_keys_provider_check
+    check (provider in ('claude', 'gemini', 'openai', 'mistral', 'openrouter', 'vercel', 'opencode-go', 'bedrock', 'azure', 'azure-foundry', 'vertex', 'xai', 'custom', 'courtlistener')),
+  encrypted_key text not null,
+  iv text not null,
+  auth_tag text not null,
+  enabled boolean not null default true,
+  settings jsonb constraint org_api_keys_settings_check
+    check (settings is null or jsonb_typeof(settings) = 'object'),
+  -- Who saved the key last. Provenance for the organization's admins; the
+  -- key outlives the account.
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(org_id, provider)
+);
+
+create index if not exists idx_org_api_keys_org
+  on public.org_api_keys(org_id);
+
+alter table public.org_api_keys enable row level security;
 
 -- Ordered, user-selected models for API routing gateways. Router slugs are
 -- deliberately provider-neutral (for example `openrouter` or `vercel`).
@@ -6879,6 +6919,7 @@ revoke all on public.tabular_review_row_sources from anon, authenticated;
 revoke all on public.tabular_review_chats from anon, authenticated;
 revoke all on public.tabular_review_chat_messages from anon, authenticated;
 revoke all on public.user_api_keys from anon, authenticated;
+revoke all on public.org_api_keys from anon, authenticated;
 revoke all on public.auth_handoff_tickets from anon, authenticated;
 revoke all on public.user_router_models from anon, authenticated;
 revoke all on public.user_mcp_connectors from anon, authenticated;
@@ -7830,5 +7871,6 @@ insert into public.schema_migrations (filename) values
   ('20261011_01_org_owner_role.sql'),
   ('20261011_02_workspace_list_filter.sql'),
   ('20261011_03_org_private_by_default.sql'),
-  ('20261012_01_public_private_list_scopes.sql')
+  ('20261012_01_public_private_list_scopes.sql'),
+  ('20261012_02_org_api_keys.sql')
 on conflict (filename) do nothing;

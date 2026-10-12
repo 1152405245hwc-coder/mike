@@ -426,6 +426,7 @@ chatRouter.patch("/:chatId", requireAuth, asyncRoute(async (req, res) => {
         chatId,
         userId,
         chatModel: access.chat.model,
+        orgId: access.chat.org_id ?? null,
         ...(title !== undefined ? { title } : {}),
         ...(hasModel
             ? {

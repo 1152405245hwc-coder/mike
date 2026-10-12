@@ -106,18 +106,46 @@ function validateVertexKey(value: string): string | null {
     : "Paste the full contents of a Google Cloud service-account key file (JSON).";
 }
 
-export function ByokProviderModal({ provider, enabledToggle, onClose }: {
+/**
+ * Where the modal reads and saves a key when that is not the caller's own
+ * profile — an organization's keys. Same fields, same checks; only the
+ * owner differs.
+ */
+export type ProviderKeyStore = {
+  hasSavedKey: boolean;
+  settings: ApiKeySettings | undefined;
+  /** Resolves false when the save failed; may throw the API error. */
+  save: (
+    provider: ApiKeyProvider,
+    value: string | null,
+    settings?: ApiKeySettings[keyof ApiKeySettings],
+  ) => Promise<boolean>;
+  /** The first breadcrumb, naming whose providers these are. */
+  breadcrumb: string;
+};
+
+export function ByokProviderModal({ provider, enabledToggle, store, onClose }: {
   provider: ByokProvider | null;
   /** The provider's on/off switch, shown once a key is saved. */
   enabledToggle?: ReactNode;
+  /** Omitted for the caller's own keys. */
+  store?: ProviderKeyStore;
   onClose: () => void;
 }) {
   const { profile, updateApiKey } = useUserProfile();
+  const hasSavedKey = store
+    ? store.hasSavedKey
+    : !!provider && profile?.apiKeys[provider.provider]?.source === "user";
+  const savedSettings = store ? store.settings : profile?.apiKeySettings;
+  const saveKey = store ? store.save : updateApiKey;
   const settingsProvider =
     SETTINGS_PROVIDERS.find((slug) => slug === provider?.provider) ?? null;
-  // Routers (and the cloud providers) also keep Model Selections.
+  // Routers (and the cloud providers) also keep Model Selections. Those are
+  // each person's own, so they are managed with a person's keys only.
   const router =
-    provider && isRouterSlug(provider.provider) ? provider.provider : null;
+    !store && provider && isRouterSlug(provider.provider)
+      ? provider.provider
+      : null;
 
   if (!provider) return null;
 
@@ -126,16 +154,16 @@ export function ByokProviderModal({ provider, enabledToggle, onClose }: {
       key={provider.provider}
       variant="modal"
       label={provider.label}
-      hasSavedKey={profile?.apiKeys[provider.provider]?.source === "user"}
+      hasSavedKey={hasSavedKey}
       keyLabel={provider.keyLabel}
       validateKey={provider.provider === "vertex" ? validateVertexKey : undefined}
-      setting={settingsProvider ? keySetting(settingsProvider, profile?.apiKeySettings) : undefined}
-      onSave={(value, settingValue) => updateApiKey(
+      setting={settingsProvider ? keySetting(settingsProvider, savedSettings) : undefined}
+      onSave={(value, settingValue) => saveKey(
         provider.provider, value.trim() || null,
         settingsProvider && settingValue ? settingsFor(settingsProvider, settingValue) : undefined,
       )}
       onRemove={async () => {
-        const removed = await updateApiKey(provider.provider, null);
+        const removed = await saveKey(provider.provider, null);
         // Nothing is left to manage once the key is gone.
         if (removed) onClose();
         return removed;
@@ -144,7 +172,7 @@ export function ByokProviderModal({ provider, enabledToggle, onClose }: {
         <Modal
           open
           onClose={onClose}
-          breadcrumbs={["Model Providers", provider.name]}
+          breadcrumbs={[store?.breadcrumb ?? "Model Providers", provider.name]}
           size={router ? "md" : "sm"}
           className="h-auto max-h-[calc(100vh-2rem)]"
           primaryAction={{ ...saveAction, variant: "blue" }}

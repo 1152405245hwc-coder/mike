@@ -35,6 +35,7 @@ import {
     updateLastSelectedChatSettings,
     parseTabularChatSelectionKey,
 } from "@/app/lib/mikeApi";
+import { apiKeyStateFromStatus } from "@/app/lib/apiKeyState";
 import type { Message } from "@/app/components/shared/types";
 import { applyDarkMode } from "@/app/lib/theme";
 import {
@@ -134,23 +135,6 @@ const UserProfileContext = createContext<UserProfileContextType | undefined>(
     undefined,
 );
 
-const API_KEY_PROVIDERS: ApiKeyProvider[] = [
-    "claude",
-    "gemini",
-    "openai",
-    "mistral",
-    "openrouter",
-    "vercel",
-    "opencode-go",
-    "bedrock",
-    "azure",
-    "azure-foundry",
-    "vertex",
-    "xai",
-    "custom",
-    "courtlistener",
-];
-
 function emptyApiKeys(): ApiKeyState {
     return {
         claude: { configured: false, source: null },
@@ -172,16 +156,7 @@ function emptyApiKeys(): ApiKeyState {
 
 function toProfile(data: ApiUserProfile): UserProfile {
     const { apiKeyStatus, ...profile } = data;
-    const apiKeys = emptyApiKeys();
-    for (const provider of API_KEY_PROVIDERS) {
-        apiKeys[provider] = {
-            configured: !!apiKeyStatus[provider],
-            enabled: apiKeyStatus.enabled?.[provider] !== false,
-            source:
-                apiKeyStatus.sources?.[provider] ??
-                (apiKeyStatus[provider] ? "user" : null),
-        };
-    }
+    const apiKeys = apiKeyStateFromStatus(apiKeyStatus);
 
     return {
         ...profile,

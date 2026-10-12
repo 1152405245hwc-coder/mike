@@ -239,10 +239,30 @@ vi.mock("../../modules/user/user.apiKeyStore", async (importOriginal) => {
     getSavedApiKeySettings: (
         actual as unknown as Record<string, unknown>
     ).getSavedApiKeySettings,
-    updateUserApiKeySettings: (...args: unknown[]) =>
-        updateUserApiKeySettings(...args),
+    // The store serves a person's keys and an organization's through one
+    // owner-based implementation. These routes are the personal ones, so
+    // each owner-based call is handed to the spy the tests already assert
+    // on, with the owner unwrapped to the user id it carries.
+    userKeyOwner: actual.userKeyOwner,
+    orgKeyOwner: actual.orgKeyOwner,
+    updateApiKeySettings: (owner: { id: string }, ...args: unknown[]) =>
+        updateUserApiKeySettings(owner.id, ...args),
     getUserApiKeyStatus: (...args: unknown[]) => getUserApiKeyStatus(...args),
+    getApiKeyStatusFor: (owner: { id: string }, ...args: unknown[]) =>
+        getUserApiKeyStatus(owner.id, ...args),
     saveUserApiKey: (...args: unknown[]) => saveUserApiKey(...args),
+    saveApiKeyFor: (
+        owner: { id: string },
+        provider: string,
+        value: string | null,
+        db: unknown,
+        settings: Record<string, unknown> = {},
+    ) =>
+        // A provider with no companion setting was, and is asserted as, a
+        // four-argument save.
+        actual.isSettingsApiKeyProvider(provider as never)
+            ? saveUserApiKey(owner.id, provider, value, db, settings)
+            : saveUserApiKey(owner.id, provider, value, db),
     hasEnvApiKey: (...args: unknown[]) => hasEnvApiKey(...args),
     normalizeApiKeyProvider: (...args: unknown[]) =>
         normalizeApiKeyProvider(...args),

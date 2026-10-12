@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getUserApiKeys, getAllUserRouterModels } = vi.hoisted(() => ({
-    getUserApiKeys: vi.fn(),
+const { getEffectiveApiKeys, getAllUserRouterModels } = vi.hoisted(() => ({
+    getEffectiveApiKeys: vi.fn(),
     getAllUserRouterModels: vi.fn(),
 }));
 
 vi.mock("../user.apiKeyStore", () => ({
-    getUserApiKeys: (...args: unknown[]) => getUserApiKeys(...args),
+    getEffectiveApiKeys: (...args: unknown[]) => getEffectiveApiKeys(...args),
 }));
 
 vi.mock("../../../lib/routerModels", async () => ({
@@ -42,7 +42,7 @@ const NO_KEYS = {
 
 beforeEach(() => {
     vi.clearAllMocks();
-    getUserApiKeys.mockResolvedValue(NO_KEYS);
+    getEffectiveApiKeys.mockResolvedValue(NO_KEYS);
     getAllUserRouterModels.mockResolvedValue({
         openrouter: ["allowed/model"],
         vercel: [],
@@ -151,6 +151,31 @@ function retryingProfileDb(
     chain.single = vi.fn(async () => results.shift() ?? second);
     return chain as never;
 }
+
+describe("getUserModelSettings keys", () => {
+    it("loads the caller's own keys for personal work", async () => {
+        const db = profileDb({});
+        await getUserModelSettings("user-1", db);
+        expect(getEffectiveApiKeys).toHaveBeenCalledExactlyOnceWith(
+            "user-1",
+            undefined,
+            db,
+        );
+    });
+
+    it("loads the keys of the organization the work belongs to", async () => {
+        const db = profileDb({});
+        const settings = await getUserModelSettings("user-1", db, {
+            orgId: "org-1",
+        });
+        expect(getEffectiveApiKeys).toHaveBeenCalledExactlyOnceWith(
+            "user-1",
+            "org-1",
+            db,
+        );
+        expect(settings.api_keys).toBe(NO_KEYS);
+    });
+});
 
 describe("getUserModelSettings on an un-migrated database", () => {
     it("retries without the memory curator column during rollout", async () => {
