@@ -240,6 +240,12 @@ export async function runLLMStream(params: {
   /** AI SDK reasoning effort for this interactive request. */
   reasoning?: import("../../../lib/llm").ReasoningLevel;
   apiKeys?: import("../../../lib/llm").UserApiKeys;
+  /**
+   * The organization the conversation belongs to. `apiKeys` are already the
+   * ones it runs on; this is for the model-list check below, which must use
+   * the same organization's lists.
+   */
+  orgId?: string | null;
   signal?: AbortSignal;
   /** Let a route persist the completed turn before it signals stream success. */
   emitDone?: boolean;
@@ -285,6 +291,7 @@ export async function runLLMStream(params: {
     buildCitations,
     model,
     apiKeys,
+    orgId,
     signal,
     projectId,
     includeMemory = false,
@@ -511,6 +518,7 @@ export async function runLLMStream(params: {
       userId,
       db,
       "throw",
+      orgId,
     );
     await streamChatWithTools({
       model: selectedModel,

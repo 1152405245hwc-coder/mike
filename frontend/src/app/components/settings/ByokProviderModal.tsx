@@ -3,7 +3,10 @@
 import type { ReactNode } from "react";
 import { Modal } from "@/app/components/modals/Modal";
 import { ApiKeyField, type ApiKeyFieldSetting } from "./ApiKeyField";
-import { RouterSettingsSection } from "./RouterSettingsSection";
+import {
+  RouterSettingsSection,
+  type RouterModelsStore,
+} from "./RouterSettingsSection";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import {
   isVertexServiceAccountKey,
@@ -122,6 +125,8 @@ export type ProviderKeyStore = {
   ) => Promise<boolean>;
   /** The first breadcrumb, naming whose providers these are. */
   breadcrumb: string;
+  /** The owner's Model Selections, for providers that keep a model list. */
+  routerModels?: RouterModelsStore;
 };
 
 export function ByokProviderModal({ provider, enabledToggle, store, onClose }: {
@@ -140,11 +145,16 @@ export function ByokProviderModal({ provider, enabledToggle, store, onClose }: {
   const saveKey = store ? store.save : updateApiKey;
   const settingsProvider =
     SETTINGS_PROVIDERS.find((slug) => slug === provider?.provider) ?? null;
-  // Routers (and the cloud providers) also keep Model Selections. Those are
-  // each person's own, so they are managed with a person's keys only.
+  // Routers (and the cloud providers) also keep Model Selections, once the
+  // owner has a key for them.
+  const routerSlug =
+    provider && isRouterSlug(provider.provider) ? provider.provider : null;
   const router =
-    !store && provider && isRouterSlug(provider.provider)
-      ? provider.provider
+    routerSlug &&
+    (store
+      ? !!store.routerModels && store.hasSavedKey
+      : profile?.apiKeys[routerSlug]?.configured === true)
+      ? routerSlug
       : null;
 
   if (!provider) return null;
@@ -173,7 +183,9 @@ export function ByokProviderModal({ provider, enabledToggle, store, onClose }: {
           open
           onClose={onClose}
           breadcrumbs={[store?.breadcrumb ?? "Model Providers", provider.name]}
-          size={router ? "md" : "sm"}
+          // Sized for the model list from the start, so the dialog does not
+          // grow the moment a key is saved.
+          size={routerSlug && (!store || store.routerModels) ? "md" : "sm"}
           className="h-auto max-h-[calc(100vh-2rem)]"
           primaryAction={{ ...saveAction, variant: "blue" }}
           secondaryAction={removeAction ? { ...removeAction, label: "Clear", variant: "danger" } : undefined}
@@ -186,8 +198,11 @@ export function ByokProviderModal({ provider, enabledToggle, store, onClose }: {
               </div>
             )}
             {fields}
-            {router && profile?.apiKeys[router]?.configured && (
-              <RouterSettingsSection provider={router} />
+            {router && (
+              <RouterSettingsSection
+                provider={router}
+                store={store?.routerModels}
+              />
             )}
           </div>
         </Modal>

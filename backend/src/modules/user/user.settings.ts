@@ -9,9 +9,7 @@ import {
     type ResponseStyle,
 } from "./user.responseStyle";
 import { safeError } from "../../lib/safeError";
-import {
-    getAllUserRouterModels,
-} from "../../lib/routerModels";
+import { getEffectiveRouterModels } from "../../lib/routerModels";
 import {
     normalizeOptionalModelPreference,
     normalizeReasoningLevel,
@@ -48,8 +46,9 @@ export type UserModelSettings = {
  * `options.orgId` is the organization the work belongs to, when it belongs
  * to one: the keys it runs on are then the organization's, with a member's
  * own keys beneath them only if the organization allows that (see
- * getEffectiveApiKeys). Everything else here is the person's own, whichever
- * workspace they are in.
+ * getEffectiveApiKeys), and the saved model preferences are judged against
+ * the lists that govern those keys (getEffectiveRouterModels). Everything
+ * else here is the person's own, whichever workspace they are in.
  */
 export async function getUserModelSettings(
     userId: string,
@@ -72,7 +71,7 @@ export async function getUserModelSettings(
             .eq("user_id", userId)
             .single(),
         getEffectiveApiKeys(userId, options.orgId, client),
-        getAllUserRouterModels(userId, client),
+        getEffectiveRouterModels(userId, options.orgId, client),
         // Instructions are an enhancement: a failed read must not block chat.
         loadCustomInstructions(client, userId).catch((error: unknown) => {
             console.error(

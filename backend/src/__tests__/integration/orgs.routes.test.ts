@@ -242,7 +242,34 @@ function query(table: string) {
 vi.mock("../../lib/supabase", () => ({
     createServerSupabase: vi.fn(() => ({
         from: (t: string) => query(t),
-        rpc: vi.fn(() => Promise.resolve({ data: [], error: null })),
+        rpc: vi.fn((name?: string, args?: Record<string, unknown>) => {
+            // The one function these routes rely on for its effect: replace
+            // an organization's model list for one provider.
+            if (name === "replace_org_router_models" && args) {
+                if (writeErrors.org_router_models)
+                    return Promise.resolve({
+                        data: null,
+                        error: writeErrors.org_router_models,
+                    });
+                const kept = (tables.org_router_models ?? []).filter(
+                    (row) =>
+                        row.org_id !== args.target_org_id ||
+                        row.router !== args.target_router,
+                );
+                tables.org_router_models = [
+                    ...kept,
+                    ...(args.target_model_ids as string[]).map(
+                        (model_id, sort_order) => ({
+                            org_id: args.target_org_id,
+                            router: args.target_router,
+                            model_id,
+                            sort_order,
+                        }),
+                    ),
+                ];
+            }
+            return Promise.resolve({ data: [], error: null });
+        }),
         auth: {
             getUser: () =>
                 Promise.resolve({
@@ -1086,6 +1113,8 @@ describe("organization provider keys", () => {
         tables.organizations[0].allow_personal_api_keys = true;
         tables.org_api_keys = [];
         tables.user_api_keys = [];
+        tables.org_router_models = [];
+        tables.user_router_models = [];
         tables.org_members.push({
             id: "m-3",
             org_id: "org-1",
@@ -1296,6 +1325,103 @@ describe("organization provider keys", () => {
             mistral: false,
             sources: { mistral: null },
         });
+    });
+
+    // -- The models an organization's key may run ---------------------------
+
+    const saveModels = (provider: string, model_ids: unknown) =>
+        request(app)
+            .put(`/orgs/org-1/api-keys/${provider}/models`)
+            .set(...AUTH)
+            .send({ model_ids });
+
+    it("lets an admin choose the models the organization's key may run", async () => {
+        await saveKey("openrouter");
+        as("admin-1", "admin@firm.example");
+
+        const res = await saveModels("openrouter", [
+            "anthropic/claude-sonnet-5",
+            "openai/gpt-6",
+        ]);
+
+        expect(res.status).toBe(200);
+        expect(res.body.router_models.openrouter).toEqual([
+            "anthropic/claude-sonnet-5",
+            "openai/gpt-6",
+        ]);
+        expect(tables.org_router_models).toHaveLength(2);
+        expect(tables.audit_events.at(-1)).toMatchObject({
+            action: "org.router_models.updated",
+        });
+    });
+
+    it("gives every member the organization's list for a provider whose key it holds", async () => {
+        await saveKey("openrouter");
+        await saveModels("openrouter", ["firm/approved"]);
+        // The member saved their own lists long ago.
+        tables.user_router_models.push(
+            { user_id: "member-1", router: "openrouter", model_id: "mine/own" },
+            { user_id: "member-1", router: "vercel", model_id: "mine/vercel" },
+        );
+        as("member-1", "member@firm.example");
+
+        const res = await request(app).get("/orgs/org-1/api-keys").set(...AUTH);
+
+        expect(res.body.effective_router_models.openrouter).toEqual([
+            "firm/approved",
+        ]);
+        // The organization has no Vercel key, so the member's list stands.
+        expect(res.body.effective_router_models.vercel).toEqual(["mine/vercel"]);
+    });
+
+    it("replaces the whole list, and clears it when sent empty", async () => {
+        await saveModels("bedrock", ["us.anthropic.claude-opus-5-5"]);
+        await saveModels("bedrock", ["us.anthropic.claude-sonnet-5-5"]);
+        expect(
+            tables.org_router_models.map((row) => row.model_id),
+        ).toEqual(["us.anthropic.claude-sonnet-5-5"]);
+
+        const res = await saveModels("bedrock", []);
+        expect(res.status).toBe(200);
+        expect(tables.org_router_models).toEqual([]);
+    });
+
+    it("refuses a plain member and an outsider", async () => {
+        as("member-1", "member@firm.example");
+        expect((await saveModels("openrouter", ["a/b"])).status).toBe(403);
+        as("stranger-1", "stranger@elsewhere.example");
+        expect((await saveModels("openrouter", ["a/b"])).status).toBe(404);
+        expect(tables.org_router_models).toEqual([]);
+    });
+
+    it("rejects a bad list as a whole rather than saving part of it", async () => {
+        expect((await saveModels("openrouter", "a/b")).status).toBe(400);
+        expect(
+            (await saveModels("openrouter", ["a/b", "has space/model"])).status,
+        ).toBe(400);
+        expect((await saveModels("openrouter", ["a/b", "a/b"])).status).toBe(400);
+        expect(
+            (
+                await saveModels(
+                    "openrouter",
+                    Array.from({ length: 51 }, (_, index) => `vendor/m${index}`),
+                )
+            ).status,
+        ).toBe(400);
+        // A provider that keeps no model list.
+        expect((await saveModels("claude", ["a/b"])).status).toBe(400);
+        expect(tables.org_router_models).toEqual([]);
+        expect(tables.audit_events).toEqual([]);
+    });
+
+    it("reports a failed save without leaking the database's message", async () => {
+        writeErrors.org_router_models = { message: "relation exploded" };
+
+        const res = await saveModels("openrouter", ["a/b"]);
+
+        expect(res.status).toBe(500);
+        expect(JSON.stringify(res.body)).not.toContain("exploded");
+        expect(tables.audit_events).toEqual([]);
     });
 });
 
