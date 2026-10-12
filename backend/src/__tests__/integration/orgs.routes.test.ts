@@ -181,6 +181,7 @@ function query(table: string) {
         select: () => builder,
         order: () => builder,
         limit: () => builder,
+        range: () => builder,
         eq: (col: string, val: unknown) => {
             filters.push({ type: "eq", col, val });
             return builder;
@@ -576,23 +577,74 @@ describe("organization workspace", () => {
         expect(res.status).toBe(404);
     });
 
-    it("requires an owner to empty an organization before deleting it", async () => {
+    it("lets an owner delete an organization together with everything it owns", async () => {
+        const ownedByOrg = (table: string) =>
+            (tables[table] ?? []).filter((row) => row.org_id === "org-1");
+        expect(ownedByOrg("projects").length).toBeGreaterThan(0);
+
         const res = await request(app)
             .delete("/orgs/org-1")
             .set(...AUTH);
-        expect(res.status).toBe(409);
-        expect(res.body.detail).toContain("still contains");
-        expect(tables.organizations).toHaveLength(1);
+        expect(res.status).toBe(204);
+        expect(tables.organizations).toEqual([]);
+        for (const table of [
+            "projects",
+            "documents",
+            "chats",
+            "tabular_reviews",
+            "workflows",
+        ]) {
+            expect(ownedByOrg(table)).toEqual([]);
+        }
+    });
 
-        tables.projects = [];
-        tables.chats = [];
-        tables.tabular_reviews = [];
-        tables.workflows = [];
-        const emptied = await request(app)
+    it("keeps the organization when deleting its content fails", async () => {
+        writeErrors.workflows = { message: "boom" };
+        const res = await request(app)
             .delete("/orgs/org-1")
             .set(...AUTH);
-        expect(emptied.status).toBe(204);
-        expect(tables.organizations).toEqual([]);
+        expect(res.status).toBe(500);
+        expect(JSON.stringify(res.body)).not.toContain("boom");
+        expect(tables.organizations).toHaveLength(1);
+    });
+
+    it.each([
+        ["chats", "chats"],
+        ["tabular-reviews", "tabular_reviews"],
+        ["projects", "projects"],
+    ])("lets an owner delete all organization %s", async (kind, table) => {
+        expect(
+            tables[table].filter((row) => row.org_id === "org-1").length,
+        ).toBeGreaterThan(0);
+        const res = await request(app)
+            .delete(`/orgs/org-1/data/${kind}`)
+            .set(...AUTH);
+        expect(res.status).toBe(204);
+        expect(tables[table].filter((row) => row.org_id === "org-1")).toEqual([]);
+        expect(tables.organizations).toHaveLength(1);
+        expect(tables.audit_events.at(-1)).toMatchObject({
+            action: "org.data.deleted",
+        });
+    });
+
+    it("refuses organization data deletion to anyone but an owner", async () => {
+        tables.org_members[1].role = "admin";
+        as("member-1", "member@firm.example");
+        const res = await request(app)
+            .delete("/orgs/org-1/data/projects")
+            .set(...AUTH);
+        expect(res.status).toBe(403);
+        expect(res.body.detail).toBe("Only an organization owner can do that.");
+        expect(
+            tables.projects.filter((row) => row.org_id === "org-1").length,
+        ).toBeGreaterThan(0);
+    });
+
+    it("answers 404 for a kind of organization data that does not exist", async () => {
+        const res = await request(app)
+            .delete("/orgs/org-1/data/everything")
+            .set(...AUTH);
+        expect(res.status).toBe(404);
     });
 
     it("refuses organization deletion to a plain member", async () => {
