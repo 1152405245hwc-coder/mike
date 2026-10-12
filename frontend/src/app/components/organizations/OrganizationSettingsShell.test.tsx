@@ -13,7 +13,7 @@ import {
 
 // The frame around an organization's settings, and the one section in it
 // that is not every member's: who is offered which sections, what a member
-// who follows a link to Model Providers is told, and what the sections are
+// who follows a link to Bring Your Own Keys is told, and what the sections are
 // handed.
 
 const mocks = vi.hoisted(() => ({
@@ -90,12 +90,12 @@ beforeEach(() => {
 
 describe("the sections each role is offered", () => {
   it.each(["owner", "admin"] as const)(
-    "offers an %s General, Members and Model Providers",
+    "offers an %s General, Members and Bring Your Own Keys",
     async (role) => {
       mocks.role = role;
       renderShell();
       await screen.findByText("section for Elite Law LLP");
-      expect(sections()).toEqual(["General", "Members", "Model Providers"]);
+      expect(sections()).toEqual(["General", "Members", "Bring Your Own Keys"]);
     },
   );
 
@@ -106,16 +106,16 @@ describe("the sections each role is offered", () => {
     expect(sections()).toEqual(["General", "Members"]);
   });
 
-  it("does not offer Model Providers before the caller's role is known", () => {
+  it("does not offer Bring Your Own Keys before the caller's role is known", () => {
     mocks.getOrg.mockReturnValue(new Promise(() => {}));
     renderShell();
     expect(sections()).toEqual(["General", "Members"]);
   });
 
-  it("drops Model Providers as soon as a re-read shows the caller was demoted", async () => {
+  it("drops Bring Your Own Keys as soon as a re-read shows the caller was demoted", async () => {
     renderShell();
     await screen.findByText("section for Elite Law LLP");
-    expect(sections()).toContain("Model Providers");
+    expect(sections()).toContain("Bring Your Own Keys");
 
     mocks.role = "member";
     await act(() => latest.reload());
@@ -160,7 +160,7 @@ describe("the frame", () => {
     renderShell();
     await screen.findByText("section for Elite Law LLP");
 
-    await user.click(screen.getByRole("button", { name: "Model Providers" }));
+    await user.click(screen.getByRole("button", { name: "Bring Your Own Keys" }));
 
     expect(mocks.push).toHaveBeenCalledWith(
       "/organizations/org-1/settings/providers",
@@ -226,7 +226,7 @@ describe("the frame", () => {
   });
 });
 
-describe("the Model Providers section", () => {
+describe("the Bring Your Own Keys section", () => {
   it.each(["owner", "admin"] as const)("is an %s's to use", async (role) => {
     mocks.role = role;
     renderShell(<OrganizationProvidersSettings />);
@@ -244,7 +244,7 @@ describe("the Model Providers section", () => {
 
     expect(
       await screen.findByText(
-        "Only this organization's owners and admins can manage its model providers.",
+        "Only this organization's owners and admins can manage its keys.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("provider-keys")).not.toBeInTheDocument();

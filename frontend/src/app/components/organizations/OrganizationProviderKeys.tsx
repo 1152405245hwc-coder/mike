@@ -245,9 +245,6 @@ export function OrganizationProviderKeys({
           <SettingsHeading id="org-providers-saved">
             Organization Providers
           </SettingsHeading>
-          <SettingsDescription>
-            Work in this organization runs on the keys saved here.
-          </SettingsDescription>
           {loading ? (
             <span className="block h-5 w-56 max-w-full animate-pulse rounded bg-gray-200" />
           ) : savedFields.length === 0 ? (

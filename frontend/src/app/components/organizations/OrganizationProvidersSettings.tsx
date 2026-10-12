@@ -12,7 +12,7 @@ import {
 } from "./OrganizationSettingsShell";
 
 /**
- * The Model Providers section of an organization's settings: its owners'
+ * The Bring Your Own Keys section of an organization's settings: its owners'
  * and admins' alone. The section is not offered to a member, and one who
  * follows a link to it is told why rather than shown controls that the
  * server would refuse.
@@ -25,8 +25,8 @@ export function OrganizationProvidersSettings() {
     return (
       <EmptyState
         icon={<OrganizationSkeuoIcon />}
-        title="Model providers"
-        description="Only this organization's owners and admins can manage its model providers."
+        title="Bring Your Own Keys"
+        description="Only this organization's owners and admins can manage its keys."
         action={
           <PillButtonUI
             tone="white"
