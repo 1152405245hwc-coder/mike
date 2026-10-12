@@ -2435,9 +2435,9 @@ create table if not exists public.chats (
   title text,
   model text,
   reasoning_level text check (reasoning_level in ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
+  -- The organization it belongs to: its project's, or, started on its own,
+  -- the workspace its author was in. Null is personal.
   org_id uuid references public.organizations(id) on delete restrict,
-  constraint chats_org_requires_project
-    check (org_id is null or project_id is not null),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -2476,6 +2476,66 @@ create index if not exists idx_chat_access_grants_chat
 
 alter table public.chat_access_grants enable row level security;
 
+-- A standalone chat or review that belongs to a team organization is private
+-- to its author (standalone_org_access_role):
+--
+--   * only current members of the organization can reach it at all, its
+--     author included: it is the organization's, and stays when they leave;
+--   * its author is its Owner;
+--   * it can be shared with other members by email, at a role; a grant held
+--     by somebody outside the organization counts for nothing;
+--   * when its author has left and no member holds an Owner grant on it, the
+--     organization's owners take it over, as they do a private project.
+--
+-- Whether an id names a team organization. False for null and for a personal
+-- organization: those are a person's own, and follow the personal rules.
+create or replace function public.org_is_team(p_org_id uuid)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.organizations o
+    where o.id = p_org_id and o.kind = 'team'
+  );
+$$;
+
+-- The role `p_user_id` holds on a standalone chat or review that belongs to
+-- a team organization. `p_grant_role` is the caller's direct grant on it, if
+-- any; `p_has_member_owner` whether a current member holds an Owner grant.
+create or replace function public.standalone_org_access_role(
+  p_org_id uuid,
+  p_creator_id uuid,
+  p_user_id text,
+  p_grant_role text,
+  p_has_member_owner boolean
+)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select case
+    when caller.role is null then null
+    when p_creator_id::text = p_user_id then 'owner'
+    when p_grant_role is not null then p_grant_role
+    when caller.role = 'owner'
+      and not coalesce(p_has_member_owner, false)
+      and not exists (
+        select 1 from public.org_members creator
+        where creator.org_id = p_org_id and creator.user_id = p_creator_id
+      ) then 'owner'
+    else null
+  end
+  from (
+    select (
+      select m.role from public.org_members m
+      where m.org_id = p_org_id and m.user_id::text = p_user_id
+    ) as role
+  ) caller;
+$$;
+
 create or replace function public.chat_access_role(
   p_chat_id uuid,
   p_chat_user_id uuid,
@@ -2494,6 +2554,26 @@ as $$
       select public.project_access_role(
         p.id, p.user_id, p.org_id, p_user_id, p_user_email
       ) from public.projects p where p.id = p_project_id
+    )
+    when public.org_is_team(p_org_id) then public.standalone_org_access_role(
+      p_org_id,
+      p_chat_user_id,
+      p_user_id,
+      (
+        select g.role from public.chat_access_grants g
+        where g.chat_id = p_chat_id
+          and coalesce(p_user_email, '') <> ''
+          and g.email = lower(p_user_email)
+        limit 1
+      ),
+      exists (
+        select 1
+        from public.chat_access_grants g
+        join public.user_profiles holder on lower(holder.email) = g.email
+        join public.org_members m
+          on m.user_id = holder.user_id and m.org_id = p_org_id
+        where g.chat_id = p_chat_id and g.role = 'owner'
+      )
     )
     when p_chat_user_id::text = p_user_id then 'owner'
     else (
@@ -2914,9 +2994,9 @@ create table if not exists public.tabular_reviews (
   document_grouping text not null default 'document' check (document_grouping in ('document', 'folder')),
   active_generation_id uuid,
   generation_lease_expires_at timestamptz,
+  -- As chats.org_id: its project's organization, or the workspace it was
+  -- started in. Null is personal.
   org_id uuid references public.organizations(id) on delete restrict,
-  constraint tabular_reviews_org_requires_project
-    check (org_id is null or project_id is not null),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -3010,6 +3090,26 @@ as $$
         p.id, p.user_id, p.org_id, p_user_id, p_user_email
       ) from public.projects p where p.id = p_project_id
     )
+    when public.org_is_team(p_org_id) then public.standalone_org_access_role(
+      p_org_id,
+      p_review_user_id,
+      p_user_id,
+      (
+        select g.role from public.tabular_review_access_grants g
+        where g.tabular_review_id = p_review_id
+          and coalesce(p_user_email, '') <> ''
+          and g.email = lower(p_user_email)
+        limit 1
+      ),
+      exists (
+        select 1
+        from public.tabular_review_access_grants g
+        join public.user_profiles holder on lower(holder.email) = g.email
+        join public.org_members m
+          on m.user_id = holder.user_id and m.org_id = p_org_id
+        where g.tabular_review_id = p_review_id and g.role = 'owner'
+      )
+    )
     when p_review_user_id::text = p_user_id then 'owner'
     else (
       select g.role from public.tabular_review_access_grants g
@@ -3028,6 +3128,13 @@ grant execute on function public.chat_access_role(uuid, uuid, uuid, uuid, text, 
 grant execute on function public.review_access_role(uuid, uuid, uuid, uuid, text, text)
   to service_role;
 grant execute on function public.workflow_access_role(uuid, uuid, uuid, text, text)
+  to service_role;
+revoke all on function public.org_is_team(uuid)
+  from public, anon, authenticated;
+revoke all on function public.standalone_org_access_role(uuid, uuid, text, text, boolean)
+  from public, anon, authenticated;
+grant execute on function public.org_is_team(uuid) to service_role;
+grant execute on function public.standalone_org_access_role(uuid, uuid, text, text, boolean)
   to service_role;
 revoke all on function public.project_is_ownerless(uuid, uuid, uuid)
   from public, anon, authenticated;
@@ -7117,7 +7224,9 @@ create trigger org_members_cleanup_admin_overrides
 
 -- A member leaving or being removed never waits on a hand-over: whatever
 -- they alone owned passes to the organization's owners the moment they are
--- gone (project_is_ownerless / workflow_is_ownerless).
+-- gone (project_is_ownerless / workflow_is_ownerless). The grants they held
+-- on the organization's standalone chats and reviews go with them, so
+-- rejoining later does not quietly restore what they could open before.
 
 create or replace function public.cleanup_removed_org_member_overrides()
 returns trigger
@@ -7129,6 +7238,20 @@ begin
   where org_id = old.org_id and user_id = old.user_id;
   delete from public.workflow_org_access_overrides
   where org_id = old.org_id and user_id = old.user_id;
+  delete from public.chat_access_grants g
+  using public.chats c, public.user_profiles holder
+  where g.chat_id = c.id
+    and c.org_id = old.org_id
+    and c.project_id is null
+    and holder.user_id = old.user_id
+    and g.email = lower(holder.email);
+  delete from public.tabular_review_access_grants g
+  using public.tabular_reviews r, public.user_profiles holder
+  where g.tabular_review_id = r.id
+    and r.org_id = old.org_id
+    and r.project_id is null
+    and holder.user_id = old.user_id
+    and g.email = lower(holder.email);
   return old;
 end;
 $$;
@@ -8214,5 +8337,6 @@ insert into public.schema_migrations (filename) values
   ('20261012_03_org_router_models.sql'),
   ('20261012_04_org_owner_private_access.sql'),
   ('20261012_05_org_logos.sql'),
-  ('20261012_06_personal_organizations.sql')
+  ('20261012_06_personal_organizations.sql'),
+  ('20261012_07_standalone_org_content.sql')
 on conflict (filename) do nothing;
