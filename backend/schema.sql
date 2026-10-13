@@ -7355,24 +7355,137 @@ create trigger org_members_cleanup_admin_overrides
 
 -- What happens to a member's work when they leave.
 --
--- Projects and workflows are the organization's lasting work, so somebody
--- must own them. Those the departing member alone owns are handed to a
--- member chosen by the person leaving or by the admin removing them
--- (assign_org_member_items; the backend refuses the removal until a
--- successor is named). Where no successor could be asked for — the account
--- itself was deleted — the organization's owners take them over
--- (project_is_ownerless / workflow_is_ownerless).
---
--- Standalone chats and tabular reviews, and a member's own documents in the
--- organization's workspace, are private to their author and are handed to
--- nobody: they are deleted with the membership, unless (for a chat or review)
--- another member holds an Owner grant on them. The grants the member held on other
--- people's go too, so rejoining later does not quietly restore what they
--- could open before.
+-- Public projects and workflows without another designated owner need a
+-- successor. Private items without another current owner are deleted with
+-- the membership; their titles are never returned in the departure preview.
+-- Other owners preserve their items. Departing members lose their grants,
+-- so rejoining later does not silently restore their former access.
+-- Personal workspaces are unaffected.
+create or replace function public.org_members_departure_items(
+  p_org_id uuid,
+  p_user_ids uuid[]
+)
+returns table (kind text, item_id uuid, title text, disposition text)
+language sql
+stable
+set search_path = public
+as $$
+  select 'project'::text, item.id,
+    case when item.visibility = 'organization' then item.name else null end,
+    case when item.visibility = 'organization' then 'transfer' else 'delete' end
+  from public.projects item
+  where item.org_id = p_org_id
+    and (
+      item.user_id = any(p_user_ids)
+      or exists (
+        select 1 from public.project_org_access_overrides held
+        where held.project_id = item.id and held.role = 'owner'
+          and held.user_id = any(p_user_ids)
+      )
+    )
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = item.user_id
+        and not (creator.user_id = any(p_user_ids))
+    )
+    and not exists (
+      select 1 from public.project_org_access_overrides other
+      join public.org_members holder
+        on holder.org_id = p_org_id and holder.user_id = other.user_id
+      where other.project_id = item.id and other.role = 'owner'
+        and not (other.user_id = any(p_user_ids))
+    )
+  union all
+  select 'workflow'::text, item.id,
+    case when item.visibility = 'organization' then item.title else null end,
+    case when item.visibility = 'organization' then 'transfer' else 'delete' end
+  from public.workflows item
+  where item.org_id = p_org_id
+    and (
+      item.user_id = any(p_user_ids)
+      or exists (
+        select 1 from public.workflow_org_access_overrides held
+        where held.workflow_id = item.id and held.role = 'owner'
+          and held.user_id = any(p_user_ids)
+      )
+    )
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = item.user_id
+        and not (creator.user_id = any(p_user_ids))
+    )
+    and not exists (
+      select 1 from public.workflow_org_access_overrides other
+      join public.org_members holder
+        on holder.org_id = p_org_id and holder.user_id = other.user_id
+      where other.workflow_id = item.id and other.role = 'owner'
+        and not (other.user_id = any(p_user_ids))
+    )
+  union all
+  select 'chat'::text, item.id, null::text, 'delete'::text
+  from public.chats item
+  where item.org_id = p_org_id and item.project_id is null
+    and (
+      item.user_id = any(p_user_ids)
+      or exists (
+        select 1 from public.chat_access_grants held
+        join public.user_profiles departing on lower(departing.email) = held.email
+        where held.chat_id = item.id and held.role = 'owner'
+          and departing.user_id = any(p_user_ids)
+      )
+    )
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = item.user_id
+        and not (creator.user_id = any(p_user_ids))
+    )
+    and not exists (
+      select 1 from public.chat_access_grants other
+      join public.user_profiles profile on lower(profile.email) = other.email
+      join public.org_members holder
+        on holder.org_id = p_org_id and holder.user_id = profile.user_id
+      where other.chat_id = item.id and other.role = 'owner'
+        and not (holder.user_id = any(p_user_ids))
+    )
+  union all
+  select 'tabular_review'::text, item.id, null::text, 'delete'::text
+  from public.tabular_reviews item
+  where item.org_id = p_org_id and item.project_id is null
+    and (
+      item.user_id = any(p_user_ids)
+      or exists (
+        select 1 from public.tabular_review_access_grants held
+        join public.user_profiles departing on lower(departing.email) = held.email
+        where held.tabular_review_id = item.id and held.role = 'owner'
+          and departing.user_id = any(p_user_ids)
+      )
+    )
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = item.user_id
+        and not (creator.user_id = any(p_user_ids))
+    )
+    and not exists (
+      select 1 from public.tabular_review_access_grants other
+      join public.user_profiles profile on lower(profile.email) = other.email
+      join public.org_members holder
+        on holder.org_id = p_org_id and holder.user_id = profile.user_id
+      where other.tabular_review_id = item.id and other.role = 'owner'
+        and not (holder.user_id = any(p_user_ids))
+    )
+  union all
+  select 'document'::text, d.id, null::text, 'delete'::text
+  from public.documents d
+  where d.org_id = p_org_id
+    and d.project_id is null and d.workflow_id is null
+    and d.user_id = any(p_user_ids);
+$$;
 
--- The private projects and workflows `p_user_id` is the only Owner of in
--- `p_org_id`: they created it or were made its Owner, and no other member is
--- one. A public item is left out: the organization's owners own those.
+revoke all on function public.org_members_departure_items(uuid, uuid[])
+  from public, anon, authenticated;
+grant execute on function public.org_members_departure_items(uuid, uuid[])
+  to service_role;
+
 create or replace function public.org_member_sole_owned_items(
   p_org_id uuid,
   p_user_id uuid
@@ -7382,57 +7495,9 @@ language sql
 stable
 set search_path = public
 as $$
-  select 'project'::text, p.id, p.name
-  from public.projects p
-  where p.org_id = p_org_id
-    and p.visibility is distinct from 'organization'
-    and (
-      p.user_id = p_user_id
-      or exists (
-        select 1 from public.project_org_access_overrides held
-        where held.project_id = p.id
-          and held.user_id = p_user_id
-          and held.role = 'owner'
-      )
-    )
-    and not exists (
-      select 1 from public.org_members creator
-      where creator.org_id = p_org_id
-        and creator.user_id = p.user_id
-        and creator.user_id <> p_user_id
-    )
-    and not exists (
-      select 1 from public.project_org_access_overrides other
-      where other.project_id = p.id
-        and other.role = 'owner'
-        and other.user_id <> p_user_id
-    )
-  union all
-  select 'workflow'::text, w.id, w.title
-  from public.workflows w
-  where w.org_id = p_org_id
-    and w.visibility is distinct from 'organization'
-    and (
-      w.user_id = p_user_id
-      or exists (
-        select 1 from public.workflow_org_access_overrides held
-        where held.workflow_id = w.id
-          and held.user_id = p_user_id
-          and held.role = 'owner'
-      )
-    )
-    and not exists (
-      select 1 from public.org_members creator
-      where creator.org_id = p_org_id
-        and creator.user_id = w.user_id
-        and creator.user_id <> p_user_id
-    )
-    and not exists (
-      select 1 from public.workflow_org_access_overrides other
-      where other.workflow_id = w.id
-        and other.role = 'owner'
-        and other.user_id <> p_user_id
-    );
+  select item.kind, item.item_id, item.title
+  from public.org_members_departure_items(p_org_id, array[p_user_id]) item
+  where item.disposition = 'transfer';
 $$;
 
 -- Make `p_to_user_id` the Owner of everything `p_from_user_id` alone owns in
@@ -7461,6 +7526,17 @@ begin
   ) then
     raise exception 'Work is handed to another member of the organization'
       using errcode = '23514';
+  end if;
+
+  -- An organization owner already owns every public item. Its override
+  -- guard deliberately rejects redundant grants, so do not insert one.
+  if exists (
+    select 1 from public.org_members m
+    where m.org_id = p_org_id and m.user_id = p_to_user_id and m.role = 'owner'
+  ) then
+    select count(*)::integer into assigned
+    from public.org_member_sole_owned_items(p_org_id, p_from_user_id);
+    return assigned;
   end if;
 
   for item in
@@ -7501,47 +7577,10 @@ language sql
 stable
 set search_path = public
 as $$
-  select 'chat'::text, c.id
-  from public.chats c
-  where c.org_id = p_org_id
-    and c.project_id is null
-    and c.user_id = p_user_id
-    and not exists (
-      select 1
-      from public.chat_access_grants g
-      join public.user_profiles holder on lower(holder.email) = g.email
-      join public.org_members m
-        on m.user_id = holder.user_id and m.org_id = p_org_id
-      where g.chat_id = c.id
-        and g.role = 'owner'
-        and holder.user_id <> p_user_id
-    )
-  union all
-  select 'tabular_review'::text, r.id
-  from public.tabular_reviews r
-  where r.org_id = p_org_id
-    and r.project_id is null
-    and r.user_id = p_user_id
-    and not exists (
-      select 1
-      from public.tabular_review_access_grants g
-      join public.user_profiles holder on lower(holder.email) = g.email
-      join public.org_members m
-        on m.user_id = holder.user_id and m.org_id = p_org_id
-      where g.tabular_review_id = r.id
-        and g.role = 'owner'
-        and holder.user_id <> p_user_id
-    )
-  union all
-  -- Their own documents in the organization's workspace: what they uploaded
-  -- to the library there or attached to a chat. One in a project or a
-  -- workflow belongs to that, and stays.
-  select 'document'::text, d.id
-  from public.documents d
-  where d.org_id = p_org_id
-    and d.project_id is null
-    and d.workflow_id is null
-    and d.user_id = p_user_id;
+  select item.kind, item.item_id
+  from public.org_members_departure_items(p_org_id, array[p_user_id]) item
+  where item.disposition = 'delete'
+    and item.kind in ('chat', 'tabular_review', 'document');
 $$;
 
 
@@ -7550,7 +7589,34 @@ returns trigger
 language plpgsql
 set search_path = public
 as $$
+declare gone record;
 begin
+  -- Serialize departures from the same organization, so two remaining
+  -- owners cannot both see the other as staying during concurrent removal.
+  perform 1 from public.organizations where id = old.org_id for update;
+  -- Inspect ownership before deleting the departing member's grants: a
+  -- member may be the last owner by a grant rather than as the creator.
+  -- One snapshot identifies all items before cascading deletes start.
+  if public.org_is_team(old.org_id) then
+    for gone in
+      select * from public.org_members_departure_items(old.org_id, array[old.user_id])
+      where disposition = 'delete'
+    loop
+      if gone.kind = 'project' then
+        delete from public.projects where id = gone.item_id;
+      elsif gone.kind = 'workflow' then
+        delete from public.workflows where id = gone.item_id;
+      elsif gone.kind = 'chat' then
+        delete from public.chats where id = gone.item_id;
+      elsif gone.kind = 'tabular_review' then
+        delete from public.tabular_reviews where id = gone.item_id;
+      elsif gone.kind = 'document' then
+        delete from public.documents where id = gone.item_id;
+      end if;
+    end loop;
+  end if;
+  -- Project/workflow foreign keys delete their contained items. Document
+  -- version deletion queues durable stored-file cleanup through its trigger.
   delete from public.project_org_access_overrides
   where org_id = old.org_id and user_id = old.user_id;
   delete from public.workflow_org_access_overrides
@@ -7569,27 +7635,11 @@ begin
     and r.project_id is null
     and holder.user_id = old.user_id
     and g.email = lower(holder.email);
-  -- Team organizations only, and only while the organization itself is
-  -- staying: when it is being deleted its content has already been dealt
-  -- with, and its row is gone by the time this runs.
-  if public.org_is_team(old.org_id) then
-    delete from public.chats c
-    using public.org_member_private_standalone(old.org_id, old.user_id) gone
-    where gone.kind = 'chat' and c.id = gone.item_id;
-    delete from public.tabular_reviews r
-    using public.org_member_private_standalone(old.org_id, old.user_id) gone
-    where gone.kind = 'tabular_review' and r.id = gone.item_id;
-    -- Deleting the row retires its versions, and their stored files with
-    -- them (queue_document_version_cleanup).
-    delete from public.documents d
-    using public.org_member_private_standalone(old.org_id, old.user_id) gone
-    where gone.kind = 'document' and d.id = gone.item_id;
-  end if;
   return old;
 end;
 $$;
 
-create trigger org_members_cleanup_access_overrides after delete
+create trigger org_members_cleanup_access_overrides before delete
   on public.org_members for each row
   execute procedure public.cleanup_removed_org_member_overrides();
 
@@ -8695,5 +8745,6 @@ insert into public.schema_migrations (filename) values
   ('20261012_07_standalone_org_content.sql'),
   ('20261013_01_member_handover.sql'),
   ('20261013_02_workspace_memory.sql'),
-  ('20261013_03_workspace_library.sql')
+  ('20261013_03_workspace_library.sql'),
+  ('20261013_04_public_member_handover.sql')
 on conflict (filename) do nothing;

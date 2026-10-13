@@ -547,16 +547,16 @@ describe("org membership", () => {
         expect(tables.org_members.map((m) => m.user_id)).toEqual(["owner-1"]);
     });
 
-    // A member's private projects and workflows that nobody else owns are
+    // A member's public projects and workflows that nobody else owns are
     // handed to a named successor before they can go.
     describe("with work only they own", () => {
         beforeEach(() => {
             tables.projects.push({
-                id: "proj-private",
+                id: "proj-public",
                 user_id: "member-1",
                 org_id: "org-1",
-                visibility: "private",
-                name: "Private matter",
+                visibility: "organization",
+                name: "Public matter",
             });
             tables.chats.push({
                 id: "chat-own",
@@ -572,11 +572,13 @@ describe("org membership", () => {
                 .set(...AUTH);
             expect(res.status).toBe(200);
             expect(res.body).toEqual({
-                projects: [{ id: "proj-private", title: "Private matter" }],
+                projects: [{ id: "proj-public", title: "Public matter" }],
                 workflows: [],
                 chats: 1,
                 reviews: 0,
                 documents: 0,
+                privateProjects: 0,
+                privateWorkflows: 0,
             });
         });
 
@@ -623,13 +625,8 @@ describe("org membership", () => {
             expect(tables.org_members.map((m) => m.user_id)).toEqual([
                 "owner-1",
             ]);
-            expect(tables.project_org_access_overrides).toEqual([
-                expect.objectContaining({
-                    project_id: "proj-private",
-                    user_id: "owner-1",
-                    role: "owner",
-                }),
-            ]);
+            // Org owners already own public items; their grant is implicit.
+            expect(tables.project_org_access_overrides).toEqual([]);
         });
 
         it("lets a member who is leaving name their own successor", async () => {
