@@ -187,6 +187,12 @@ function query(table: string) {
             filters.push({ type: "eq", col, val });
             return builder;
         },
+        is: (col: string, val: unknown) => {
+            // Existing fixtures omit nullable columns.
+            for (const row of tables[table] ?? []) if (!(col in row)) row[col] = null;
+            filters.push({ type: "eq", col, val });
+            return builder;
+        },
         // `.not(col, "is", null)` — the only negation the routes use.
         not: (col: string, operator: string, val: unknown) => {
             if (operator === "is" && val === null) {
@@ -577,6 +583,9 @@ describe("org membership", () => {
                 chats: 1,
                 reviews: 0,
                 documents: 0,
+                sharedChats: 0,
+                sharedReviews: 0,
+                sharedDocuments: 0,
                 privateProjects: 0,
                 privateWorkflows: 0,
             });
@@ -595,18 +604,11 @@ describe("org membership", () => {
             expect(other.status).toBe(403);
         });
 
-        it("409s the removal until a successor is named, with what is waiting", async () => {
-            const res = await request(app)
-                .delete("/orgs/org-1/members/member-1")
-                .set(...AUTH);
-            expect(res.status).toBe(409);
-            expect(res.body).toEqual({
-                code: "handover_required",
-                detail: "Choose a member to take over their projects and workflows first.",
-                projects: 1,
-                workflows: 0,
-            });
-            expect(tables.org_members).toHaveLength(2);
+        it("defaults the bulk handover to a remaining organization owner", async () => {
+            const res = await request(app).delete("/orgs/org-1/members/member-1").set(...AUTH);
+            expect(res.status).toBe(204);
+            expect(tables.org_members.map((m) => m.user_id)).toEqual(["owner-1"]);
+            expect(tables.projects.find((p) => p.id === "proj-public")).toBeDefined();
         });
 
         it("400s a successor who is not another member", async () => {

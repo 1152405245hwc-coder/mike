@@ -1651,13 +1651,9 @@ describe("user.routes", () => {
                 .set(...AUTH);
 
             expect(res.status).toBe(204);
-            // Durable job queued...
-            const jobInserts = (supabaseState.inserts.db_jobs ?? []) as Record<
-                string,
-                unknown
-            >[];
-            expect(jobInserts).toHaveLength(1);
-            expect(jobInserts[0]).toMatchObject({ kind: "account.delete" });
+            expect(supabaseRpc).toHaveBeenCalledWith("request_account_deletion", {
+                p_user_id: "u1", p_user_email: "u1@test.local",
+            });
             // ...auth user still present, so the cascade can still read the
             // storage paths it is about to delete.
             expect(adminDeleteUser).not.toHaveBeenCalled();
@@ -1682,7 +1678,7 @@ describe("user.routes", () => {
             expect(res.status).toBe(409);
             expect(res.body.code).toBe("org_successor_required");
             expect(res.body.detail).toBe(
-                "You are the only owner of Org A. Make another member an owner, or delete the organization, before deleting your account. You are the only owner of Org B, which still owns content. Delete or move the organization's projects, workflows, documents and reviews, or delete the organization, before deleting your account.",
+                "You are the only owner of Org A. Make another member an owner, or delete the organization, before deleting your account. You are the only owner of Org B, and must appoint another owner or explicitly delete the organization before deleting your account.",
             );
             expect(res.body.organizations).toEqual([
                 { org_id: "o1", name: "Org A", reason: "members" },
@@ -1748,10 +1744,10 @@ describe("user.routes", () => {
         it("DELETE /user/account returns 500 when the cascade cannot be scheduled", async () => {
             // Nothing has been destroyed yet, so the request is cleanly
             // retriable — it must not answer 204.
-            supabaseState.tables.db_jobs = {
+            supabaseRpc.mockResolvedValueOnce({
                 data: null,
                 error: { code: "08006", message: "connection lost" },
-            };
+            });
 
             const res = await request(app)
                 .delete("/user/account")
