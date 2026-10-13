@@ -1093,71 +1093,6 @@ as $$
     );
 $$;
 
-create or replace function public.workflow_is_ownerless(
-  p_workflow_id uuid,
-  p_workflow_user_id uuid,
-  p_org_id uuid
-)
-returns boolean
-language sql
-stable
-set search_path = public
-as $$
-  select p_org_id is not null
-    and not exists (
-      select 1 from public.org_members creator
-      where creator.org_id = p_org_id and creator.user_id = p_workflow_user_id
-    )
-    and not exists (
-      select 1 from public.workflow_org_access_overrides o
-      where o.workflow_id = p_workflow_id and o.role = 'owner'
-    );
-$$;
-
--- The same question for the backend, which holds an id rather than a row.
-create or replace function public.org_item_is_ownerless(
-  p_kind text,
-  p_item_id uuid
-)
-returns boolean
-language sql
-stable
-set search_path = public
-as $$
-  select case p_kind
-    when 'project' then coalesce((
-      select public.project_is_ownerless(p.id, p.user_id, p.org_id)
-      from public.projects p where p.id = p_item_id
-    ), false)
-    when 'workflow' then coalesce((
-      select public.workflow_is_ownerless(w.id, w.user_id, w.org_id)
-      from public.workflows w where w.id = p_item_id
-    ), false)
-    else false
-  end;
-$$;
-
--- Every private item without an Owner in the given organizations, for the
--- backend's list filters. Normally empty or close to it.
-create or replace function public.ownerless_org_item_ids(p_org_ids uuid[])
-returns table (kind text, item_id uuid)
-language sql
-stable
-set search_path = public
-as $$
-  select 'project'::text, p.id
-  from public.projects p
-  where p.org_id = any(p_org_ids)
-    and p.visibility <> 'organization'
-    and public.project_is_ownerless(p.id, p.user_id, p.org_id)
-  union all
-  select 'workflow'::text, w.id
-  from public.workflows w
-  where w.org_id = any(p_org_ids)
-    and w.visibility <> 'organization'
-    and public.workflow_is_ownerless(w.id, w.user_id, w.org_id);
-$$;
-
 create or replace function public.project_access_role(
   p_project_id uuid,
   p_project_user_id uuid,
@@ -1634,6 +1569,75 @@ create index if not exists idx_workflow_org_access_overrides_user
   on public.workflow_org_access_overrides(user_id);
 
 alter table public.workflow_org_access_overrides enable row level security;
+
+-- The workflow half of "an organization's item with no Owner left" (see
+-- project_is_ownerless above), and the two functions that answer for either
+-- kind. They are SQL functions, checked when they are created, so they live
+-- here: after the workflow tables they read.
+create or replace function public.workflow_is_ownerless(
+  p_workflow_id uuid,
+  p_workflow_user_id uuid,
+  p_org_id uuid
+)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select p_org_id is not null
+    and not exists (
+      select 1 from public.org_members creator
+      where creator.org_id = p_org_id and creator.user_id = p_workflow_user_id
+    )
+    and not exists (
+      select 1 from public.workflow_org_access_overrides o
+      where o.workflow_id = p_workflow_id and o.role = 'owner'
+    );
+$$;
+
+-- The same question for the backend, which holds an id rather than a row.
+create or replace function public.org_item_is_ownerless(
+  p_kind text,
+  p_item_id uuid
+)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select case p_kind
+    when 'project' then coalesce((
+      select public.project_is_ownerless(p.id, p.user_id, p.org_id)
+      from public.projects p where p.id = p_item_id
+    ), false)
+    when 'workflow' then coalesce((
+      select public.workflow_is_ownerless(w.id, w.user_id, w.org_id)
+      from public.workflows w where w.id = p_item_id
+    ), false)
+    else false
+  end;
+$$;
+
+-- Every private item without an Owner in the given organizations, for the
+-- backend's list filters. Normally empty or close to it.
+create or replace function public.ownerless_org_item_ids(p_org_ids uuid[])
+returns table (kind text, item_id uuid)
+language sql
+stable
+set search_path = public
+as $$
+  select 'project'::text, p.id
+  from public.projects p
+  where p.org_id = any(p_org_ids)
+    and p.visibility <> 'organization'
+    and public.project_is_ownerless(p.id, p.user_id, p.org_id)
+  union all
+  select 'workflow'::text, w.id
+  from public.workflows w
+  where w.org_id = any(p_org_ids)
+    and w.visibility <> 'organization'
+    and public.workflow_is_ownerless(w.id, w.user_id, w.org_id);
+$$;
 
 create or replace function public.workflow_access_role(
   p_workflow_id uuid,
