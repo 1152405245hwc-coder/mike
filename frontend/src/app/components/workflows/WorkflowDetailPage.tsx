@@ -87,6 +87,7 @@ import { DocumentUploadMenu } from "@/app/components/shared/DocumentUploadMenu";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { DocumentWorkspaceScope } from "@/app/contexts/WorkspaceContext";
+import { useItemWorkspace } from "@/app/hooks/useItemWorkspace";
 import { useQueryParamTab } from "@/app/hooks/useQueryParamTab";
 import { downloadWorkflowZip } from "./workflowZipExport";
 import { WorkflowAssets, type WorkflowAssetsHandle } from "./WorkflowAssets";
@@ -124,6 +125,11 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
   const { user } = useAuth();
   const { profile } = useUserProfile();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  // Opening a workflow opens its workspace. A built-in one belongs to none.
+  useItemWorkspace(
+    workflow?.id,
+    workflow && !workflow.is_system ? (workflow.org_id ?? null) : undefined,
+  );
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
