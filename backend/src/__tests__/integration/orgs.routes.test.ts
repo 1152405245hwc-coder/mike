@@ -3,6 +3,7 @@ import request from "supertest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ownerlessRpcResult } from "../helpers/ownerlessRpc";
+import { handoverRpcResult } from "../helpers/handoverRpc";
 
 // ---------------------------------------------------------------------------
 // Organizations, invitations and project organization overrides, over HTTP.
@@ -250,6 +251,9 @@ vi.mock("../../lib/supabase", () => ({
             // Whether an item has an Owner left is the database's to say.
             const ownerless = ownerlessRpcResult(tables, name ?? "", args);
             if (ownerless) return Promise.resolve(ownerless);
+            // ... and so is what a departing member alone owns.
+            const handover = handoverRpcResult(tables, name ?? "", args);
+            if (handover) return Promise.resolve(handover);
             // The one function these routes rely on for its effect: replace
             // an organization's model list for one provider.
             if (name === "replace_org_router_models" && args) {
@@ -387,6 +391,7 @@ describe("a personal organization", () => {
         ["get", "/orgs/mine/members", undefined],
         ["patch", "/orgs/mine/members/owner-1", { role: "member" }],
         ["delete", "/orgs/mine/members/owner-1", undefined],
+        ["get", "/orgs/mine/members/owner-1/handover", undefined],
         ["post", "/orgs/mine/invitations", { email: "friend@example.com" }],
         ["get", "/orgs/mine/invitations", undefined],
         ["delete", "/orgs/mine/invitations/inv-1", undefined],
@@ -419,7 +424,7 @@ describe("a personal organization", () => {
                 /orgsRouter\.(?:get|post|put|patch|delete)\(\s*"(\/:orgId[^"]*)",\s*(\w+),/g,
             ),
         ].map(([, path, guard]) => ({ path, guard }));
-        expect(routes.length).toBeGreaterThanOrEqual(19);
+        expect(routes.length).toBeGreaterThanOrEqual(21);
         expect(routes.filter((route) => route.guard !== "requireOrgAuth")).toEqual(
             [],
         );
@@ -540,6 +545,99 @@ describe("org membership", () => {
             .set(...AUTH);
         expect(res.status).toBe(204);
         expect(tables.org_members.map((m) => m.user_id)).toEqual(["owner-1"]);
+    });
+
+    // A member's private projects and workflows that nobody else owns are
+    // handed to a named successor before they can go.
+    describe("with work only they own", () => {
+        beforeEach(() => {
+            tables.projects.push({
+                id: "proj-private",
+                user_id: "member-1",
+                org_id: "org-1",
+                visibility: "private",
+                name: "Private matter",
+            });
+            tables.chats.push({
+                id: "chat-own",
+                user_id: "member-1",
+                project_id: null,
+                org_id: "org-1",
+            });
+        });
+
+        it("tells an admin what removing them would hand over and delete", async () => {
+            const res = await request(app)
+                .get("/orgs/org-1/members/member-1/handover")
+                .set(...AUTH);
+            expect(res.status).toBe(200);
+            expect(res.body).toEqual({
+                projects: [{ id: "proj-private", title: "Private matter" }],
+                workflows: [],
+                chats: 1,
+                reviews: 0,
+            });
+        });
+
+        it("tells the member the same about leaving, and nobody else", async () => {
+            as("member-1", "member@firm.example");
+            const own = await request(app)
+                .get("/orgs/org-1/members/member-1/handover")
+                .set(...AUTH);
+            expect(own.status).toBe(200);
+            // A plain member asking about somebody else.
+            const other = await request(app)
+                .get("/orgs/org-1/members/owner-1/handover")
+                .set(...AUTH);
+            expect(other.status).toBe(403);
+        });
+
+        it("409s the removal until a successor is named, with what is waiting", async () => {
+            const res = await request(app)
+                .delete("/orgs/org-1/members/member-1")
+                .set(...AUTH);
+            expect(res.status).toBe(409);
+            expect(res.body).toEqual({
+                code: "handover_required",
+                detail: "Choose a member to take over their projects and workflows first.",
+                projects: 1,
+                workflows: 0,
+            });
+            expect(tables.org_members).toHaveLength(2);
+        });
+
+        it("400s a successor who is not another member", async () => {
+            const res = await request(app)
+                .delete("/orgs/org-1/members/member-1?assign_to=member-1")
+                .set(...AUTH);
+            expect(res.status).toBe(400);
+            expect(tables.org_members).toHaveLength(2);
+        });
+
+        it("hands the work to the named successor and removes the member (204)", async () => {
+            const res = await request(app)
+                .delete("/orgs/org-1/members/member-1?assign_to=owner-1")
+                .set(...AUTH);
+            expect(res.status).toBe(204);
+            expect(tables.org_members.map((m) => m.user_id)).toEqual([
+                "owner-1",
+            ]);
+            expect(tables.project_org_access_overrides).toEqual([
+                expect.objectContaining({
+                    project_id: "proj-private",
+                    user_id: "owner-1",
+                    role: "owner",
+                }),
+            ]);
+        });
+
+        it("lets a member who is leaving name their own successor", async () => {
+            as("member-1", "member@firm.example");
+            const res = await request(app)
+                .delete("/orgs/org-1/members/member-1?assign_to=owner-1")
+                .set(...AUTH);
+            expect(res.status).toBe(204);
+        });
     });
 
     it("has no endpoint that adds a member directly", async () => {
