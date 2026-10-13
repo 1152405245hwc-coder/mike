@@ -25,6 +25,27 @@
 -- Safe to re-run: add column / create index if not exists, drop-before-
 -- create for constraints and the replaced index, create or replace.
 
+-- This migration rewrites functions that 20260917_02_memory_followup.sql
+-- introduced. A database whose ledger records that file without it ever
+-- having run (`migrate.sh baseline` named one file too far) would otherwise
+-- stop part-way down with an error about a function that does not exist.
+-- Stop here instead, before anything is changed, and say what to do.
+do $$
+begin
+  if to_regprocedure('public.memory_project_is_private(uuid)') is null
+    or to_regprocedure('public.delete_user_private_memories(uuid)') is null
+    or to_regprocedure(
+      'public.memory_source_allows_app_memory(text, uuid, uuid, uuid)'
+    ) is null
+  then
+    raise exception using
+      errcode = '55000',
+      message = 'This database is missing objects from 20260917_02_memory_followup.sql',
+      detail = 'The migration ledger records that file as applied, but the functions it creates are not here. It was most likely recorded by `migrate.sh baseline` without having been run.',
+      hint = 'Apply that file by hand (every statement in it is safe to re-run), then run `migrate.sh up` again: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f backend/migrations/20260917_02_memory_followup.sql';
+  end if;
+end $$;
+
 alter table public.memory_files
   add column if not exists org_id uuid;
 

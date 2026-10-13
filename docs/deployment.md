@@ -113,6 +113,24 @@ Docker Compose needs none of this: its `db-init` service runs
 `migrate.sh up` on every start, and adopts a volume created before the ledger
 automatically on its first start.
 
+If `baseline` was given a file that the database had not actually reached,
+the files in between are recorded but were never run, and nothing reports it
+until a later migration needs what they created. A migration that depends on
+an earlier one in that way checks for it first and stops with the name of
+the missing file, before changing anything:
+
+```text
+ERROR:  This database is missing objects from 20260917_02_memory_followup.sql
+HINT:   Apply that file by hand ..., then run `migrate.sh up` again
+```
+
+Apply the named file with `psql` as the hint shows, then run
+`migrate.sh up` again. To look for other gaps of the same kind, compare the
+output of `backend/scripts/schema-fingerprint.sql` on the deployment with the
+same script run against a database freshly installed from `schema.sql` at the
+same commit; any line that differs is an object the deployment is missing or
+has in an older form.
+
 ### After the organization-access upgrade: `tabular_review_legacy_shares`
 
 `20260904_02_migrate_legacy_sharing.sql` converts the old roleless

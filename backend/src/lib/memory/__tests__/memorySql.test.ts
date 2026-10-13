@@ -529,4 +529,36 @@ describe("per-workspace memory SQL", () => {
       }
     }
   });
+
+  // `migrate.sh baseline` records earlier files without running them. Named
+  // one file too far, it leaves a database that says it has the older memory
+  // migration and does not; this one then failed half-way down on a function
+  // that was never created. It checks first, before changing anything.
+  it("stops before changing anything when the older memory migration never ran", () => {
+    const guard = workspaceMigration.indexOf(
+      "to_regprocedure('public.memory_project_is_private(uuid)') is null",
+    );
+    const firstChange = workspaceMigration.search(
+      /^(alter|create|drop|insert|update|delete)\b/m,
+    );
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(firstChange);
+    // It names the missing file and how to apply it.
+    expect(workspaceMigration).toContain(
+      "message = 'This database is missing objects from 20260917_02_memory_followup.sql'",
+    );
+    expect(workspaceMigration).toContain(
+      "-f backend/migrations/20260917_02_memory_followup.sql",
+    );
+    // The file it sends people to really does create what is checked for.
+    for (const name of [
+      "memory_project_is_private",
+      "delete_user_private_memories",
+      "memory_source_allows_app_memory",
+    ]) {
+      expect(followupMigration).toContain(
+        `create or replace function public.${name}(`,
+      );
+    }
+  });
 });

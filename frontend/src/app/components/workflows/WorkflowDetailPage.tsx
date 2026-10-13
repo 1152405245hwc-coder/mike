@@ -86,6 +86,7 @@ import { UploadOverlay } from "@/app/components/assistant/UploadOverlay";
 import { DocumentUploadMenu } from "@/app/components/shared/DocumentUploadMenu";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { DocumentWorkspaceScope } from "@/app/contexts/WorkspaceContext";
 import { useQueryParamTab } from "@/app/hooks/useQueryParamTab";
 import { downloadWorkflowZip } from "./workflowZipExport";
 import { WorkflowAssets, type WorkflowAssetsHandle } from "./WorkflowAssets";
@@ -563,21 +564,23 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
         onClose={() => setUseOpen(false)}
         skipSelect
       />
-      <AddDocumentsModal
-        open={addSavedAssetsOpen}
-        onClose={() => setAddSavedAssetsOpen(false)}
-        onSelect={(documents: Document[]) => {
-          assetsRef.current?.addSavedDocuments(documents);
-          setAddSavedAssetsOpen(false);
-        }}
-        breadcrumb={[
-          "Workflows",
-          workflow.metadata.title,
-          "Assets",
-          "Add Assets",
-        ]}
-        keepMounted
-      />
+      <DocumentWorkspaceScope orgId={workflow.org_id ?? null}>
+        <AddDocumentsModal
+          open={addSavedAssetsOpen}
+          onClose={() => setAddSavedAssetsOpen(false)}
+          onSelect={(documents: Document[]) => {
+            assetsRef.current?.addSavedDocuments(documents);
+            setAddSavedAssetsOpen(false);
+          }}
+          breadcrumb={[
+            "Workflows",
+            workflow.metadata.title,
+            "Assets",
+            "Add Assets",
+          ]}
+          keepMounted
+        />
+      </DocumentWorkspaceScope>
       <NewWorkflowModal
         open={detailsOpen}
         editWorkflow={workflow}
