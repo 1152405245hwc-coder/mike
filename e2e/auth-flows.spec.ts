@@ -37,16 +37,17 @@ test.describe("unauthenticated", () => {
            element we actually care about, so a hang fails pointing at the
            missing banner instead of at an inscrutable load state. */
 
-        /* The login page conditionally renders:
-               <div className="text-red-600 text-sm bg-red-50 p-3 rounded">
-                   {error}
-               </div>
-           when the `error` state is non-null after a failed signInWithPassword.
-           REGRESSION: fails if the error <div className="bg-red-50"> is removed
-           from the login form or if the catch block stops setting `error`. */
-        await expect(page.locator("div.bg-red-50.text-red-600")).toBeVisible({
-            timeout: 10_000,
-        });
+        /* The login page opens a WarningPopup (role="alert", with a "Dismiss
+           warning" button) when the `error` state is non-null after a failed
+           signInWithPassword. The filter keeps Next's own route announcer,
+           also an alert, out of the match.
+           REGRESSION: fails if the popup is removed from the login page or
+           if the catch block stops setting `error`. */
+        await expect(
+            page.getByRole("alert").filter({
+                has: page.getByRole("button", { name: "Dismiss warning" }),
+            }),
+        ).toBeVisible({ timeout: 10_000 });
     });
 
     /* ── Test 2: valid credentials redirect to /assistant ─────────────────── */
