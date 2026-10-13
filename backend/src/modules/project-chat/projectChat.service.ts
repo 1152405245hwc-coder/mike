@@ -36,6 +36,11 @@ import {
     resolveContentOrgId,
 } from "../../lib/access";
 import { hasDirectContentGrants } from "../../lib/contentAccess";
+import {
+    DOCUMENT_WORKSPACE_MISMATCH_CODE,
+    DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+    findNewAttachmentsOutsideWorkspace,
+} from "../../lib/documentWorkspace";
 import { can, type ProjectRole } from "../../lib/permissions";
 import {
     resolveEffectiveReasoningLevel,
@@ -123,6 +128,8 @@ export type PreparedProjectChatStream = {
     workflowStore: Awaited<ReturnType<typeof buildWorkflowStore>>;
     legalResearchUs: boolean;
     apiKeys: Awaited<ReturnType<typeof getUserModelSettings>>["api_keys"];
+    /** The organization the chat belongs to, whose keys and model lists apply. */
+    orgId: string | null;
     titleModel: Awaited<ReturnType<typeof getUserModelSettings>>["title_model"];
     selectedModel: string;
     selectedReasoningLevel: ReturnType<
@@ -287,12 +294,33 @@ export async function prepareProjectChatStream(
             detail: "You do not have permission to write in this project.",
         };
 
+    // A project chat draws on its project, and on attachments from the
+    // project's own workspace. Checked before anything is written.
+    try {
+        const outside = await findNewAttachmentsOutsideWorkspace(db, {
+            messages,
+            chatId,
+            orgId: projectAccess.project.org_id ?? null,
+        });
+        if (outside.length > 0)
+            return {
+                ok: false,
+                status: 400,
+                code: DOCUMENT_WORKSPACE_MISMATCH_CODE,
+                detail: DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+            };
+    } catch (error) {
+        return { ok: false, internal: true, error };
+    }
+
     const selection = await resolveUserChatSelection(db, {
         userId,
         chatModel,
         chatReasoningLevel,
         requestedModel: args.requestedModel,
         requestedReasoning: args.requestedReasoning,
+        // The project's organization pays for its chats.
+        orgId: projectAccess.project.org_id ?? null,
     });
     if (!selection.ok) return selection;
     const { modelSettings, selectedModel, selectedReasoningLevel } = selection;
@@ -549,6 +577,7 @@ export async function prepareProjectChatStream(
                 workflowStore,
                 legalResearchUs,
                 apiKeys,
+                orgId: projectAccess.project.org_id ?? null,
                 titleModel,
                 selectedModel,
                 selectedReasoningLevel,

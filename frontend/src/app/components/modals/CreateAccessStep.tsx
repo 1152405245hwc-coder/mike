@@ -8,7 +8,8 @@ import {
     type OrgMember,
     type UserLookupResult,
 } from "@/app/lib/mikeApi";
-import type { ProjectRole } from "@/app/lib/permissions";
+import type { ContentVisibility } from "@/app/components/shared/types";
+import { isOrgOwner, type ProjectRole } from "@/app/lib/permissions";
 import {
     OrganizationAccessEditor,
     AccessEditor,
@@ -40,6 +41,8 @@ export function CreateAccessStep({
     inheritedFromProject = false,
     inheritedProjectId = null,
     ownerLabel = "Project owners",
+    resourceNoun,
+    visibility = "private",
 }: {
     orgId: string | null;
     organizationName?: string | null;
@@ -53,6 +56,13 @@ export function CreateAccessStep({
     /** The project whose people are shown, read-only, when access is inherited. */
     inheritedProjectId?: string | null;
     ownerLabel?: string;
+    /** What the item is called where the step describes sharing it. */
+    resourceNoun?: string;
+    /**
+     * For an organization's item: public or private, as chosen on the
+     * details step. Decides whether individuals can be added here.
+     */
+    visibility?: ContentVisibility;
 }) {
     const [memberState, setMemberState] = useState<{
         orgId: string;
@@ -185,7 +195,10 @@ export function CreateAccessStep({
             user_id: member.user_id,
             email: member.email,
             display_name: member.display_name,
-            role: member.role === "admin" ? "owner" : "editor",
+            // Marked so the editor can leave the organization's owners out
+            // of a public item's pickers: they own those already. A private
+            // item is shared with them like with anyone.
+            role: isOrgOwner(member.role) ? "owner" : "editor",
             isCreator,
         };
     });
@@ -244,7 +257,7 @@ export function CreateAccessStep({
 
     function assignOrganizationMember(
         member: AccessRow,
-        role: "owner" | "deny",
+        role: AccessAssignmentRole,
     ) {
         if (!member.user_id || !member.email) return;
         onOrgOverridesChange?.([
@@ -266,8 +279,12 @@ export function CreateAccessStep({
                 assignments={organizationAssignments}
                 organizationName={organizationName}
                 ownerLabel={ownerLabel}
+                resourceNoun={resourceNoun}
                 loading={loading}
                 error={loadError}
+                currentUserId={currentUserId}
+                currentUserEmail={currentUserEmail}
+                visibility={visibility}
                 onAssign={assignOrganizationMember}
                 onRemove={(assignment) =>
                     onOrgOverridesChange?.(

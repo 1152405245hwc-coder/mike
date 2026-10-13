@@ -3,7 +3,10 @@
 import type { ReactNode } from "react";
 import { Modal } from "@/app/components/modals/Modal";
 import { ApiKeyField, type ApiKeyFieldSetting } from "./ApiKeyField";
-import { RouterSettingsSection } from "./RouterSettingsSection";
+import {
+  RouterSettingsSection,
+  type RouterModelsStore,
+} from "./RouterSettingsSection";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import {
   isVertexServiceAccountKey,
@@ -106,18 +109,53 @@ function validateVertexKey(value: string): string | null {
     : "Paste the full contents of a Google Cloud service-account key file (JSON).";
 }
 
-export function ByokProviderModal({ provider, enabledToggle, onClose }: {
+/**
+ * Where the modal reads and saves a key when that is not the caller's own
+ * profile — an organization's keys. Same fields, same checks; only the
+ * owner differs.
+ */
+export type ProviderKeyStore = {
+  hasSavedKey: boolean;
+  settings: ApiKeySettings | undefined;
+  /** Resolves false when the save failed; may throw the API error. */
+  save: (
+    provider: ApiKeyProvider,
+    value: string | null,
+    settings?: ApiKeySettings[keyof ApiKeySettings],
+  ) => Promise<boolean>;
+  /** The first breadcrumb, naming whose providers these are. */
+  breadcrumb: string;
+  /** The owner's Model Selections, for providers that keep a model list. */
+  routerModels?: RouterModelsStore;
+};
+
+export function ByokProviderModal({ provider, enabledToggle, store, onClose }: {
   provider: ByokProvider | null;
   /** The provider's on/off switch, shown once a key is saved. */
   enabledToggle?: ReactNode;
+  /** Omitted for the caller's own keys. */
+  store?: ProviderKeyStore;
   onClose: () => void;
 }) {
   const { profile, updateApiKey } = useUserProfile();
+  const hasSavedKey = store
+    ? store.hasSavedKey
+    : !!provider && profile?.apiKeys[provider.provider]?.source === "user";
+  const savedSettings = store ? store.settings : profile?.apiKeySettings;
+  const saveKey = store ? store.save : updateApiKey;
   const settingsProvider =
     SETTINGS_PROVIDERS.find((slug) => slug === provider?.provider) ?? null;
-  // Routers (and the cloud providers) also keep Model Selections.
-  const router =
+  // Routers (and the cloud providers) also keep Model Selections, once the
+  // owner has a key for them.
+  const routerSlug =
     provider && isRouterSlug(provider.provider) ? provider.provider : null;
+  const router =
+    routerSlug &&
+    (store
+      ? !!store.routerModels && store.hasSavedKey
+      : profile?.apiKeys[routerSlug]?.configured === true)
+      ? routerSlug
+      : null;
 
   if (!provider) return null;
 
@@ -126,16 +164,16 @@ export function ByokProviderModal({ provider, enabledToggle, onClose }: {
       key={provider.provider}
       variant="modal"
       label={provider.label}
-      hasSavedKey={profile?.apiKeys[provider.provider]?.source === "user"}
+      hasSavedKey={hasSavedKey}
       keyLabel={provider.keyLabel}
       validateKey={provider.provider === "vertex" ? validateVertexKey : undefined}
-      setting={settingsProvider ? keySetting(settingsProvider, profile?.apiKeySettings) : undefined}
-      onSave={(value, settingValue) => updateApiKey(
+      setting={settingsProvider ? keySetting(settingsProvider, savedSettings) : undefined}
+      onSave={(value, settingValue) => saveKey(
         provider.provider, value.trim() || null,
         settingsProvider && settingValue ? settingsFor(settingsProvider, settingValue) : undefined,
       )}
       onRemove={async () => {
-        const removed = await updateApiKey(provider.provider, null);
+        const removed = await saveKey(provider.provider, null);
         // Nothing is left to manage once the key is gone.
         if (removed) onClose();
         return removed;
@@ -144,8 +182,10 @@ export function ByokProviderModal({ provider, enabledToggle, onClose }: {
         <Modal
           open
           onClose={onClose}
-          breadcrumbs={["Model Providers", provider.name]}
-          size={router ? "md" : "sm"}
+          breadcrumbs={[store?.breadcrumb ?? "Model Providers", provider.name]}
+          // Sized for the model list from the start, so the dialog does not
+          // grow the moment a key is saved.
+          size={routerSlug && (!store || store.routerModels) ? "md" : "sm"}
           className="h-auto max-h-[calc(100vh-2rem)]"
           primaryAction={{ ...saveAction, variant: "blue" }}
           secondaryAction={removeAction ? { ...removeAction, label: "Clear", variant: "danger" } : undefined}
@@ -158,8 +198,11 @@ export function ByokProviderModal({ provider, enabledToggle, onClose }: {
               </div>
             )}
             {fields}
-            {router && profile?.apiKeys[router]?.configured && (
-              <RouterSettingsSection provider={router} />
+            {router && (
+              <RouterSettingsSection
+                provider={router}
+                store={store?.routerModels}
+              />
             )}
           </div>
         </Modal>

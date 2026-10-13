@@ -12,9 +12,17 @@ import {
     filterAccessibleDocumentIds,
     normalizeEmail,
     resolveContentOrgId,
+    resolveStandaloneOrgId,
 } from "../../lib/access";
+import { teamOrgIdOf } from "../../lib/personalOrgs";
+import {
+    DOCUMENT_WORKSPACE_MISMATCH_CODE,
+    DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+    findDocumentsOutsideWorkspace,
+} from "../../lib/documentWorkspace";
 import { can, type ProjectRole } from "../../lib/permissions";
 import { loadProfileUsersByEmail } from "../../lib/userLookup";
+import { type WorkspaceFilter } from "../../lib/workspace";
 import {
     deleteContentGrant,
     listContentGrants,
@@ -342,6 +350,7 @@ export type ListReviewsFilters = {
     pagination: { limit: number; offset: number };
     searchTerm: string | null;
     sort: { key: string; direction: string };
+    workspace?: WorkspaceFilter;
 };
 
 export async function listTabularReviews(
@@ -375,6 +384,7 @@ export async function listTabularReviewIds(
         projectIdFilter: string | null;
         scope: TabularReviewScope;
         searchTerm: string | null;
+        workspace?: WorkspaceFilter;
     },
 ): Promise<TabularResult<ReviewIdRow[]>> {
     const ids: ReviewIdRow[] = [];
@@ -435,9 +445,9 @@ export async function createTabularReview(
         });
     }
 
-    const selectedModel = await validateSelectedModel(model, userId, db);
-    if (!selectedModel.ok) return modelFailure(selectedModel);
-
+    // The project is checked before the model: it decides whose keys the
+    // review runs on (its organization's, when it has one).
+    let projectOrgId: string | null = null;
     if (project_id) {
         // Creating a review inside a project contributes content to it.
         const access = await checkProjectAccess(
@@ -454,22 +464,56 @@ export async function createTabularReview(
                 "forbidden",
                 "You do not have permission to write in this project.",
             );
+        projectOrgId = access.project.org_id ?? null;
     }
+
+    // A review started on its own belongs to the workspace it was started
+    // in: the organization the client names, or Personal when it names none.
+    // Inside a project the project decides, and `org_id` is not consulted.
+    let standaloneOrgId: string | null = null;
+    if (!project_id) {
+        const standalone = await resolveStandaloneOrgId(db, {
+            userId,
+            orgId: org_id,
+        });
+        if (!standalone.ok) return failure("validation", standalone.detail);
+        standaloneOrgId = standalone.orgId;
+    }
+
+    const selectedModel = await validateSelectedModel(
+        model,
+        userId,
+        db,
+        project_id ? projectOrgId : standaloneOrgId,
+    );
+    if (!selectedModel.ok) return modelFailure(selectedModel);
     const allowedDocumentIds = Array.isArray(document_ids)
         ? await filterAccessibleDocumentIds(document_ids, userId, userEmail, db)
         : [];
     const grouping = normalizeGrouping(document_grouping);
     // Project reviews inherit their project's organization as tenant
-    // provenance. Standalone reviews are always direct-scoped.
-    const resolvedOrg = await resolveContentOrgId(db, {
-        projectId: project_id ?? null,
-    });
+    // provenance.
+    const resolvedOrg = project_id
+        ? await resolveContentOrgId(db, { projectId: project_id })
+        : ({ ok: true, orgId: standaloneOrgId } as const);
     if (!resolvedOrg.ok) return internalFailure(resolvedOrg.detail);
-    if (org_id != null) {
-        return failure(
-            "validation",
-            "Tabular reviews cannot be organization-scoped. Create the review inside an organization project instead.",
+    // A review is built from documents in its own workspace. Refused rather
+    // than dropped: a review that quietly came out with fewer rows than were
+    // chosen would look like a fault.
+    try {
+        const outside = await findDocumentsOutsideWorkspace(
+            db,
+            allowedDocumentIds,
+            resolvedOrg.orgId,
         );
+        if (outside.length > 0)
+            return failure(
+                "validation",
+                DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+                DOCUMENT_WORKSPACE_MISMATCH_CODE,
+            );
+    } catch (error) {
+        return internalFailure(error);
     }
     const { data: review, error } = await db
         .from("tabular_reviews")
@@ -718,7 +762,9 @@ export async function getTabularReviewAccess(
         ok: true,
         data: {
             scope: "direct",
-            org_id: null,
+            // The organization whose members it can be shared with, or null
+            // for a personal review, which can be shared with anyone.
+            org_id: await teamOrgIdOf(db, review.org_id),
             access_role: projectRole,
             grants: listed.grants,
         },
@@ -764,6 +810,7 @@ export async function grantTabularReviewAccess(
         email: args.email,
         role: args.role,
         createdBy: args.userId,
+        orgId: await teamOrgIdOf(db, gate.review.org_id),
         creatorEmail: gate.review.user_id
             ? userById.get(gate.review.user_id)?.email
             : null,
@@ -875,6 +922,7 @@ export async function updateTabularReview(
             body.model,
             userId,
             db,
+            existingReview.org_id ?? null,
         );
         if (!selectedModel.ok) return modelFailure(selectedModel);
         updates.model = selectedModel.model;
@@ -946,20 +994,75 @@ export async function updateTabularReview(
             }
         }
         updates.project_id = projectIdUpdate;
-        // `tabular_reviews.org_id` is a DENORMALIZED copy of the project's
-        // tenant, stamped at creation and read directly by the SQL visibility
-        // predicates (`tr.org_id is not null and exists (select 1 from
-        // org_members …)`). Moving the review to another project changes
-        // which tenant owns it, so the copy has to be restamped from the
-        // destination — otherwise a review moved out of an org project into a
-        // personal one keeps answering yes to that org arm and stays visible
-        // to every member of an organization it no longer belongs to. Same
-        // helper and argument shape as the create path.
-        const movedOrg = await resolveContentOrgId(db, {
-            projectId: projectIdUpdate ?? null,
-        });
-        if (!movedOrg.ok) return internalFailure(movedOrg.detail);
-        updates.org_id = movedOrg.orgId;
+        // `tabular_reviews.org_id` is the organization the review belongs
+        // to, read directly by the SQL access rule (review_access_role). In a
+        // project it is a copy of the project's, so a move restamps it from
+        // the destination.
+        //
+        // What belongs to a team organization stays in it. Taken out of its
+        // project, such a review becomes a standalone review of the same
+        // organization rather than its mover's personal property; and it
+        // cannot be moved into a project somewhere else.
+        const currentOrgId = await teamOrgIdOf(
+            db,
+            (existingReview.org_id as string | null | undefined) ?? null,
+        );
+        if (projectIdUpdate) {
+            const movedOrg = await resolveContentOrgId(db, {
+                projectId: projectIdUpdate,
+            });
+            if (!movedOrg.ok) return internalFailure(movedOrg.detail);
+            if (currentOrgId && movedOrg.orgId !== currentOrgId)
+                return failure(
+                    "validation",
+                    "This review belongs to an organization and can only be moved to a project in the same organization.",
+                );
+            updates.org_id = movedOrg.orgId;
+        } else {
+            updates.org_id = currentOrgId;
+        }
+    }
+
+    // A review is built from documents in its own workspace. Documents it
+    // already has are let through while it stays where it is — a review from
+    // before this rule keeps working — but a move into another workspace
+    // takes every document with it, so there all of them are looked at.
+    if (Array.isArray(body.document_ids) || projectIdUpdateProvided) {
+        try {
+            const existingDocumentIds = (existingReview.document_ids ??
+                []) as string[];
+            const nextDocumentIds =
+                (updates.document_ids as string[] | undefined) ??
+                existingDocumentIds;
+            const currentOrgId = await teamOrgIdOf(
+                db,
+                (existingReview.org_id as string | null | undefined) ?? null,
+            );
+            const nextOrgId = projectIdUpdateProvided
+                ? await teamOrgIdOf(db, updates.org_id as string | null)
+                : currentOrgId;
+            const moved = nextOrgId !== currentOrgId;
+            const toCheck = moved
+                ? nextDocumentIds
+                : nextDocumentIds.filter(
+                      (id) => !existingDocumentIds.includes(id),
+                  );
+            const outside = await findDocumentsOutsideWorkspace(
+                db,
+                toCheck,
+                nextOrgId,
+            );
+            if (outside.length > 0)
+                return failure(
+                    "validation",
+                    moved
+                        ? "This review uses documents from the workspace it is in, so it cannot be moved to a project in another one."
+                        : DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+                    DOCUMENT_WORKSPACE_MISMATCH_CODE,
+                );
+        } catch (error) {
+            return internalFailure(error);
+        }
     }
 
     const { data: updatedReview, error: updateError } = await db

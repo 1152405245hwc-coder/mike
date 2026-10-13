@@ -1,3 +1,4 @@
+import { listOrgDepartures, reassignOrgDepartureArchives, deleteOrgDepartureArchives } from "./mikeApi";
 import { getGoogleWorkspaceStatus, startGoogleWorkspaceOAuth, cancelGoogleWorkspaceOAuth, disconnectGoogleWorkspace, updateGoogleWorkspaceSettings, setGoogleWorkspaceToolEnabled, updateGoogleDriveSettings, setGoogleDriveToolEnabled } from "./mikeApi";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantEvent, Chat } from "@/app/components/shared/types";
@@ -104,6 +105,16 @@ import {
     createOrg,
     createOrgInvitation,
     deleteOrg,
+    deleteOrgData,
+    getOrgLogo,
+    saveOrgLogo,
+    deleteOrgLogo,
+    getOrgApiKeys,
+    saveOrgApiKey,
+    saveOrgRouterModels,
+    setOrgApiKeyEnabled,
+    setOrgPersonalApiKeysAllowed,
+    getOrgMemberHandover,
     declineOrgInvitation,
     getOrg,
     getProjectAccess,
@@ -114,7 +125,6 @@ import {
     listMyOrgInvitations,
     listOrgInvitations,
     listOrgMembers,
-    listOrgResources,
     listOrgs,
     removeOrgMember,
     resendOrgInvitation,
@@ -1845,6 +1855,42 @@ describe("Library search", () => {
 
         expect(lastFetchCall().url).toBe("/api/library/files/filter-options");
     });
+
+    // The library is per workspace: a call that names one carries it on the
+    // query string, after whatever else the call asks for.
+    it("names the workspace on every library call that is given one", async () => {
+        const scope = { kind: "files" as const, workspace: "org-1" };
+        fetchMock.mockImplementation(async () =>
+            jsonResponse({ fileTypes: [], documents: [], folders: [] }),
+        );
+
+        await getLibraryFilterOptions(scope);
+        expect(lastFetchCall().url).toBe(
+            "/api/library/files/filter-options?workspace=org-1",
+        );
+        await getLibrary(scope, { limit: 50 });
+        expect(lastFetchCall().url).toBe(
+            "/api/library/files?limit=50&workspace=org-1",
+        );
+        await searchLibraryDocuments(scope, { search: "nda" });
+        expect(lastFetchCall().url).toBe(
+            "/api/library/files?view=search&search=nda&workspace=org-1",
+        );
+        await getLibrary({ kind: "templates", workspace: "personal" });
+        expect(lastFetchCall().url).toBe(
+            "/api/library/templates?workspace=personal",
+        );
+    });
+
+    it("names no workspace for a bare kind, or a scope without one", async () => {
+        fetchMock.mockImplementation(async () =>
+            jsonResponse({ documents: [], folders: [] }),
+        );
+        await getLibrary("files");
+        expect(lastFetchCall().url).toBe("/api/library/files");
+        await getLibrary({ kind: "files" });
+        expect(lastFetchCall().url).toBe("/api/library/files");
+    });
 });
 
 describe("tabular review CRUD", () => {
@@ -3038,11 +3084,6 @@ describe("thin endpoint wrappers", () => {
             method: "DELETE",
         },
         {
-            name: "listOrgResources",
-            call: () => listOrgResources("org-1"),
-            url: "/orgs/org-1/resources",
-        },
-        {
             name: "listOrgMembers",
             call: () => listOrgMembers("org-1"),
             url: "/orgs/org-1/members",
@@ -3105,6 +3146,69 @@ describe("thin endpoint wrappers", () => {
             call: () => declineOrgInvitation("inv-1"),
             url: "/user/invitations/inv-1/decline",
             method: "POST",
+        },
+        {
+            name: "deleteOrgData", call: () => deleteOrgData("org-1", "projects"),
+            url: "/orgs/org-1/data/projects", method: "DELETE",
+        },
+        {
+            name: "saveOrgLogo", call: () => saveOrgLogo("org-1", "data:image/png;base64,test"),
+            url: "/orgs/org-1/logo", method: "PUT", body: { data_url: "data:image/png;base64,test" },
+        },
+        {
+            name: "deleteOrgLogo", call: () => deleteOrgLogo("org-1"),
+            url: "/orgs/org-1/logo", method: "DELETE",
+        },
+        {
+            name: "getOrgApiKeys", call: () => getOrgApiKeys("org-1"), url: "/orgs/org-1/api-keys",
+        },
+        {
+            name: "saveOrgApiKey (clear)", call: () => saveOrgApiKey("org-1", "openai", null),
+            url: "/orgs/org-1/api-keys/openai", method: "PUT", body: { api_key: null },
+        },
+        {
+            name: "saveOrgApiKey (provider settings)", call: () => saveOrgApiKey("org-1", "bedrock", "synthetic-key", { region: "us-east-1" }),
+            url: "/orgs/org-1/api-keys/bedrock", method: "PUT", body: { api_key: "synthetic-key", settings: { region: "us-east-1" } },
+        },
+        {
+            name: "saveOrgRouterModels", call: () => saveOrgRouterModels("org-1", "openrouter", ["provider/model"]),
+            url: "/orgs/org-1/api-keys/openrouter/models", method: "PUT", body: { model_ids: ["provider/model"] },
+        },
+        {
+            name: "setOrgApiKeyEnabled", call: () => setOrgApiKeyEnabled("org-1", "openai", false),
+            url: "/orgs/org-1/api-keys/openai", method: "PATCH", body: { enabled: false },
+        },
+        {
+            name: "setOrgPersonalApiKeysAllowed", call: () => setOrgPersonalApiKeysAllowed("org-1", false),
+            url: "/orgs/org-1/api-keys/policy", method: "PUT", body: { allow_personal_api_keys: false },
+        },
+        {
+            name: "getOrgMemberHandover", call: () => getOrgMemberHandover("org-1", "user-2"),
+            url: "/orgs/org-1/members/user-2/handover",
+        },
+        {
+            name: "getOrgMemberHandover (bulk)", call: () => getOrgMemberHandover("org-1", "user-2", ["user-2", "user-3"]),
+            url: "/orgs/org-1/members/user-2/handover?departing_user_ids=user-2%2Cuser-3",
+        },
+        {
+            name: "removeOrgMember (successor)", call: () => removeOrgMember("org-1", "user-2", "user-3"),
+            url: "/orgs/org-1/members/user-2?assign_to=user-3", method: "DELETE",
+        },
+        {
+            name: "getUserMemory (workspace)", call: () => getUserMemory(undefined, "org-1"),
+            url: "/user/memory?workspace=org-1",
+        },
+        {
+            name: "updateUserMemory (workspace)", call: () => updateUserMemory("# Preferences", 3, "org-1"),
+            url: "/user/memory?workspace=org-1", method: "PUT", body: { content: "# Preferences", expected_revision: 3 },
+        },
+        {
+            name: "setUserMemoryEnabled (workspace)", call: () => setUserMemoryEnabled(false, "org-1"),
+            url: "/user/memory/settings?workspace=org-1", method: "PATCH", body: { enabled: false },
+        },
+        {
+            name: "getOpenRouterModels (workspace)", call: () => getOpenRouterModels("org-1"),
+            url: "/models/openrouter?workspace=org-1",
         },
         // Per-recipient project access grants.
         {
@@ -3288,5 +3392,107 @@ describe("unwrapping and blob wrappers", () => {
         expect(lastFetchCall().url).toBe("/api/user/exports/exp%2F1/download");
         expect(filename).toBe("history.csv");
         expect(await blob.text()).toBe("csv-bytes");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Active workspace: every scoped list can be narrowed, and none is narrowed
+// unless a workspace is named — the route treats the parameter's absence as
+// "every workspace", which is what callers outside the app shell rely on.
+// ---------------------------------------------------------------------------
+describe("workspace parameter on list requests", () => {
+    const ORG = "7b1d9d0e-3c5a-4f6e-9a51-0c2f7d3e8a11";
+    const requests: [string, (workspace?: string) => Promise<unknown>, string][] = [
+        ["searchProjectDirectory", (workspace) => searchProjectDirectory({ search: "matter", workspace }), "/api/projects"],
+        ["listProjectsPage", (workspace) => listProjectsPage({ workspace }), "/api/projects"],
+        [
+            "listProjectSummaries",
+            (workspace) => listProjectSummaries({ workspace }),
+            "/api/projects",
+        ],
+        ["listProjectIds", (workspace) => listProjectIds({ workspace }), "/api/projects/ids"],
+        [
+            "getProjectFilterOptions",
+            (workspace) => getProjectFilterOptions(undefined, workspace),
+            "/api/projects/filter-options",
+        ],
+        ["listChats", (workspace) => listChats({ workspace }), "/api/chat"],
+        [
+            "listTabularReviews",
+            (workspace) => listTabularReviews(undefined, { workspace }),
+            "/api/tabular-review",
+        ],
+        [
+            "listTabularReviewIds",
+            (workspace) => listTabularReviewIds(undefined, { workspace }),
+            "/api/tabular-review/ids",
+        ],
+        ["listWorkflowsPage", (workspace) => listWorkflowsPage({ workspace }), "/api/workflows"],
+        ["listWorkflowIds", (workspace) => listWorkflowIds({ workspace }), "/api/workflows/ids"],
+        [
+            "getWorkflowFilterOptions",
+            (workspace) => getWorkflowFilterOptions({ workspace }),
+            "/api/workflows/filter-options",
+        ],
+    ];
+
+    const workspaceOf = (url: string) =>
+        new URL(url, "http://localhost").searchParams.get("workspace");
+    const pathOf = (url: string) => new URL(url, "http://localhost").pathname;
+
+    it.each(requests)("%s sends the workspace it is given", async (_name, request, path) => {
+        // A fresh response per call: a Response body can only be read once.
+        fetchMock.mockImplementation(async () => jsonResponse([]));
+
+        await request(ORG);
+        expect(pathOf(lastFetchCall().url)).toBe(path);
+        expect(workspaceOf(lastFetchCall().url)).toBe(ORG);
+
+        await request("personal");
+        expect(workspaceOf(lastFetchCall().url)).toBe("personal");
+    });
+
+    it.each(requests)("%s sends no workspace when none is given", async (_name, request, path) => {
+        // A fresh response per call: a Response body can only be read once.
+        fetchMock.mockImplementation(async () => jsonResponse([]));
+
+        await request();
+        expect(pathOf(lastFetchCall().url)).toBe(path);
+        expect(workspaceOf(lastFetchCall().url)).toBeNull();
+    });
+});
+
+
+describe("organization archives", () => {
+    it("lists the archive by departure", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ departures: [], truncated: false }));
+        expect(await listOrgDepartures("org")).toEqual({ departures: [], truncated: false });
+        expect(lastFetchCall().url).toBe("/api/orgs/org/departures");
+    });
+    it("sends the new owner and permanent deletion for several items at once", async () => {
+        fetchMock.mockImplementation(async () => jsonResponse({ resolved: 2, unresolved: 0 }));
+        expect(await reassignOrgDepartureArchives("org", ["a", "b"], "member")).toEqual({ resolved: 2, unresolved: 0 });
+        expect(lastFetchCall()).toMatchObject({ url: "/api/orgs/org/archives/recover", init: { method: "POST", body: JSON.stringify({ archive_ids: ["a", "b"], assign_to: "member" }) } });
+        await deleteOrgDepartureArchives("org", ["a", "b"]);
+        expect(lastFetchCall()).toMatchObject({ url: "/api/orgs/org/archives/delete", init: { method: "POST", body: JSON.stringify({ archive_ids: ["a", "b"] }) } });
+    });
+});
+
+
+describe("organization logos", () => {
+    it.each(["data:image/png;base64,test", ""])("reads the saved logo or an empty logo (%s)", async (dataUrl) => {
+        fetchMock.mockResolvedValue(jsonResponse({ data_url: dataUrl }));
+        expect(await getOrgLogo("org-1")).toBe(dataUrl || null);
+        expect(lastFetchCall().url).toBe("/api/orgs/org-1/logo");
+    });
+
+    it("treats a missing logo as empty without hiding server or network errors", async () => {
+        fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "Not found" }, { status: 404 }));
+        expect(await getOrgLogo("org-1")).toBeNull();
+        fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "Unavailable" }, { status: 503 }));
+        await expect(getOrgLogo("org-1")).rejects.toMatchObject({ status: 503 });
+        const error = new TypeError("Network unavailable");
+        fetchMock.mockRejectedValueOnce(error);
+        await expect(getOrgLogo("org-1")).rejects.toBe(error);
     });
 });

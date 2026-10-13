@@ -86,6 +86,8 @@ import { UploadOverlay } from "@/app/components/assistant/UploadOverlay";
 import { DocumentUploadMenu } from "@/app/components/shared/DocumentUploadMenu";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { DocumentWorkspaceScope } from "@/app/contexts/WorkspaceContext";
+import { useItemWorkspace } from "@/app/hooks/useItemWorkspace";
 import { useQueryParamTab } from "@/app/hooks/useQueryParamTab";
 import { downloadWorkflowZip } from "./workflowZipExport";
 import { WorkflowAssets, type WorkflowAssetsHandle } from "./WorkflowAssets";
@@ -123,6 +125,11 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
   const { user } = useAuth();
   const { profile } = useUserProfile();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  // Opening a workflow opens its workspace. A built-in one belongs to none.
+  useItemWorkspace(
+    workflow?.id,
+    workflow && !workflow.is_system ? (workflow.org_id ?? null) : undefined,
+  );
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
@@ -563,21 +570,23 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
         onClose={() => setUseOpen(false)}
         skipSelect
       />
-      <AddDocumentsModal
-        open={addSavedAssetsOpen}
-        onClose={() => setAddSavedAssetsOpen(false)}
-        onSelect={(documents: Document[]) => {
-          assetsRef.current?.addSavedDocuments(documents);
-          setAddSavedAssetsOpen(false);
-        }}
-        breadcrumb={[
-          "Workflows",
-          workflow.metadata.title,
-          "Assets",
-          "Add Assets",
-        ]}
-        keepMounted
-      />
+      <DocumentWorkspaceScope orgId={workflow.org_id ?? null}>
+        <AddDocumentsModal
+          open={addSavedAssetsOpen}
+          onClose={() => setAddSavedAssetsOpen(false)}
+          onSelect={(documents: Document[]) => {
+            assetsRef.current?.addSavedDocuments(documents);
+            setAddSavedAssetsOpen(false);
+          }}
+          breadcrumb={[
+            "Workflows",
+            workflow.metadata.title,
+            "Assets",
+            "Add Assets",
+          ]}
+          keepMounted
+        />
+      </DocumentWorkspaceScope>
       <NewWorkflowModal
         open={detailsOpen}
         editWorkflow={workflow}
@@ -621,6 +630,7 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
             orgId: workflow.org_id ?? null,
             ownerLabel: "Workflow owners",
             canManage: canShare,
+            visibility: workflow.visibility ?? "private",
             error: shareRefreshError,
             // The refresh is deliberately not part of the mutation's result:
             // AccessModal reports a rejection as "Could not change that role"

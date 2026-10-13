@@ -381,6 +381,11 @@ async function processCreatedDocument(
     if (workflowError) throw new Error(workflowError.message);
     orgId = (workflowRow as { org_id?: string | null } | null)?.org_id ?? null;
   }
+  if (!orgId && (scope === "standalone" || scope === "library")) {
+    // Uploaded on its own: the workspace the session named, which was
+    // checked against the uploader's memberships when it was opened.
+    orgId = (destination.org_id as string | null | undefined) ?? null;
+  }
 
   // The upsert below is what makes a retry idempotent — and, on a retry, what
   // would silently RESURRECT a document the user deleted while this job was

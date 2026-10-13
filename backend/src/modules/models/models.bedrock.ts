@@ -4,7 +4,7 @@ import {
     bedrockServiceUrl,
     envBedrockCredentials,
 } from "../../lib/llm/cloudProviders";
-import { getUserApiKeys } from "../user/user.service";
+import { getEffectiveApiKeys } from "../user/user.service";
 import { catalogFailureReason } from "./models.compatible";
 import type { CatalogModel, CatalogResult } from "./models.service";
 
@@ -13,12 +13,18 @@ function modelId(value: unknown): value is string {
 }
 
 /** Regional foundation models and account-visible inference profiles. No keys leave the backend. */
-export async function listBedrockModels(db: Db, userId: string): Promise<CatalogResult> {
+export async function listBedrockModels(
+    db: Db,
+    userId: string,
+    orgId?: string | null,
+): Promise<CatalogResult> {
     // Reading the user's keys is Mike's own work: a failure there is an
     // internal error to log, not a provider outage.
     let credentials: ReturnType<typeof bedrockCredentials>;
     try {
-        credentials = bedrockCredentials(await getUserApiKeys(userId, db));
+        credentials = bedrockCredentials(
+            await getEffectiveApiKeys(userId, orgId, db),
+        );
     } catch (error) {
         return { ok: false, kind: "error", error };
     }

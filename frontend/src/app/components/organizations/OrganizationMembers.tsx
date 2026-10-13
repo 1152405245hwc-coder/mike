@@ -10,13 +10,15 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { Check, ChevronDown, Loader2, Pencil, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/contexts/AuthContext";
+import { useWorkspace } from "@/app/contexts/WorkspaceContext";
 import { PageHeader } from "@/app/components/shared/PageHeader";
+import { TableLoadMoreRow } from "@/app/components/shared/TableLoadMoreRow";
+import { TableToolbar } from "@/app/components/shared/TableToolbar";
 import { HeaderActionsMenu } from "@/app/components/shared/HeaderActionsMenu";
 import { SelectionActionsMenu } from "@/app/components/shared/SelectionActionsMenu";
-import { TableToolbar } from "@/app/components/shared/TableToolbar";
 import {
   SkeletonCheckbox,
   SkeletonLine,
@@ -24,7 +26,6 @@ import {
   TableBody,
   TableCell,
   TableEmptyState,
-  TableFilters,
   TableSortFilter,
   TableHeaderCell,
   TableHeaderRow,
@@ -35,12 +36,12 @@ import {
   type TableFilterOption,
   type TableSortDirection,
 } from "@/app/components/shared/TablePrimitive";
-import {
-  OrganizationSkeuoIcon,
-  WorkflowSkeuoIcon,
-} from "@/app/components/shared/AppSidebarSkeuoIcons";
-import { ClosedProjectSvgIcon } from "@/app/components/shared/FolderSvgIcon";
+import { OrganizationSkeuoIcon } from "@/app/components/shared/AppSidebarSkeuoIcons";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
+import {
+  MemberDepartureDialog,
+  type MemberDepartureResult,
+} from "./MemberDepartureDialog";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
 import { EmptyState } from "@/app/components/ui/empty-state";
 import {
@@ -54,38 +55,63 @@ import {
   getOrg,
   listOrgInvitations,
   listOrgMembers,
-  listOrgResources,
-  removeOrgMember,
   updateOrgMember,
   type Org,
   type OrgInvitation,
   type OrgMember,
-  type OrgResources,
 } from "@/app/lib/mikeApi";
-import { ORG_ROLE_LABELS, type OrgRole } from "@/app/lib/permissions";
-import { userFacingApiError } from "@/app/lib/userFacingError";
 import {
-  InviteOrganizationMemberModal,
-  OrganizationSettingsModal,
-} from "./OrganizationModals";
+  ORG_ROLE_LABELS,
+  ORG_ROLES,
+  canManageOrgRole,
+  isOrgAdmin,
+  type OrgRole,
+} from "@/app/lib/permissions";
+import { userFacingApiError } from "@/app/lib/userFacingError";
+import { OrganizationDepartedMembers } from "./OrganizationDepartedMembers";
+import { InviteOrganizationMemberModal } from "./OrganizationModals";
 
-type OrganizationTab = "people" | "projects" | "workflows";
+/** The roster's fixed order: who decides, who runs it, everybody else. */
+const ROLE_ORDER: Record<OrgRole, number> = { owner: 0, admin: 1, member: 2 };
 
-const TABS: { id: OrganizationTab; label: string }[] = [
-  { id: "people", label: "People" },
-  { id: "projects", label: "Projects" },
-  { id: "workflows", label: "Workflows" },
-];
+/** Rows drawn per page, as in the app's other paginated tables. */
+const MEMBERS_PAGE_SIZE = 30;
 
-const EMPTY_RESOURCES: OrgResources = { projects: [], workflows: [] };
+/** Where somebody lands once they have left the organization. */
+const AFTER_DEPARTURE = "/settings/organizations";
 
+// Role colours follow the project access editor: blue for the top role,
+// violet for the middle one, grey for the base one. Amber is the app's
+// caution colour, so no role uses it.
 const ROLE_FILTER_OPTIONS: TableFilterOption<OrgRole>[] = [
-  { value: "admin", label: ORG_ROLE_LABELS.admin, className: "text-blue-700" },
+  { value: "owner", label: ORG_ROLE_LABELS.owner, className: "text-blue-700" },
+  {
+    value: "admin",
+    label: ORG_ROLE_LABELS.admin,
+    className: "text-violet-700",
+  },
   {
     value: "member",
     label: ORG_ROLE_LABELS.member,
-    className: "text-violet-700",
+    className: "text-gray-600",
   },
+];
+
+/**
+ * The page's tabs: everyone, the people holding one role, or — for the
+ * organization's owners — the people who have left and the work they left.
+ */
+type RosterTab = "all" | OrgRole | "departed";
+
+const ROSTER_TABS: { id: RosterTab; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "owner", label: "Owners" },
+  { id: "admin", label: "Admins" },
+  { id: "member", label: "Members" },
+];
+const OWNER_TABS: { id: RosterTab; label: string }[] = [
+  ...ROSTER_TABS,
+  { id: "departed", label: "Departed" },
 ];
 
 function formatDate(value?: string | null) {
@@ -99,27 +125,46 @@ function formatDate(value?: string | null) {
   });
 }
 
-function resourceName(value: string | null | undefined, fallback: string) {
-  return value?.trim() || fallback;
-}
-
-export function OrganizationWorkspace({ orgId }: { orgId: string }) {
+/**
+ * The Members page of an organization's settings: its roster, each
+ * person's role, and — for its owners and admins — adding, removing and
+ * inviting people. Everyone in the organization can read it.
+ *
+ * A table page like the app's others, with search and the add button in the
+ * page header, rather than a section inside the settings frame: a roster
+ * needs the width, and it is where an organization's admins spend their
+ * time. The header's first crumb leads back to the other sections.
+ *
+ * It loads the organization itself, so the roster and the caller's role on
+ * it always come from the same read. `onViewerRoleChanged` tells the
+ * surrounding settings area when the caller has changed their own role,
+ * which decides the sections it offers.
+ */
+export function OrganizationMembers({
+  orgId,
+  onViewerRoleChanged,
+  initialTab = "all",
+}: {
+  orgId: string;
+  onViewerRoleChanged?: () => void;
+  /** Opens on the Departed view, for a link that leads straight to it. */
+  initialTab?: "all" | "departed";
+}) {
   const router = useRouter();
   const { user } = useAuth();
+  const { refreshOrganizations } = useWorkspace();
   const [org, setOrg] = useState<Org | null>(null);
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [invitations, setInvitations] = useState<OrgInvitation[]>([]);
-  const [resources, setResources] = useState<OrgResources>(EMPTY_RESOURCES);
-  const [activeTab, setActiveTab] = useState<OrganizationTab>("people");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [busyMemberId, setBusyMemberId] = useState<string | null>(null);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
+  const [rosterTab, setRosterTab] = useState<RosterTab>(initialTab);
   const [removeSelectedOpen, setRemoveSelectedOpen] = useState(false);
-  const [removingSelected, setRemovingSelected] = useState(false);
   const [removeMember, setRemoveMember] = useState<OrgMember | null>(null);
   const [pendingSelfRoleChange, setPendingSelfRoleChange] = useState<{
     member: OrgMember;
@@ -161,16 +206,14 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
     const invitationsTicket = ++invitationsRequestRef.current;
     try {
       const nextOrg = await getOrg(orgId);
-      const [nextMembers, nextResources, nextInvitations] = await Promise.all([
+      const [nextMembers, nextInvitations] = await Promise.all([
         listOrgMembers(orgId),
-        listOrgResources(orgId),
-        nextOrg.role === "admin"
+        isOrgAdmin(nextOrg.role)
           ? listOrgInvitations(orgId)
           : Promise.resolve([] as OrgInvitation[]),
       ]);
       setOrg(nextOrg);
       applyMembers(membersTicket, nextMembers);
-      setResources(nextResources);
       if (invitationsTicket === invitationsRequestRef.current)
         setInvitations(nextInvitations);
     } catch (error) {
@@ -184,7 +227,7 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
   }, [applyMembers, orgId]);
 
   const refreshInvitations = useCallback(async () => {
-    if (org?.role !== "admin") return;
+    if (!isOrgAdmin(org?.role)) return;
     const ticket = ++invitationsRequestRef.current;
     const nextInvitations = await listOrgInvitations(orgId);
     if (ticket !== invitationsRequestRef.current) return;
@@ -232,16 +275,47 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
     void load();
   }, [load]);
 
-  const isAdmin = org?.role === "admin";
+  const viewerRole = org?.role ?? null;
+  const isAdmin = isOrgAdmin(viewerRole);
+  // The Departed view is its owners' alone: nobody else is offered the tab,
+  // and a link to it opens the roster for them.
+  const tabs = viewerRole === "owner" ? OWNER_TABS : ROSTER_TABS;
+  const tab = rosterTab === "departed" && viewerRole !== "owner" ? "all" : rosterTab;
+  const changeTab = (next: RosterTab) => {
+    setRosterTab(next);
+    // A selection made under one tab does not carry into another, where
+    // some of it would be out of sight.
+    setSelectedMemberIds([]);
+  };
+
+  /**
+   * Mirrors the server: the viewer must outrank both the role the member
+   * holds and the one they would be given, owners excepted. Offering a change
+   * the server refuses only ever produced a 403.
+   */
+  function canChangeRole(member: OrgMember, role: OrgRole) {
+    return (
+      canManageOrgRole(viewerRole, member.role) &&
+      canManageOrgRole(viewerRole, role)
+    );
+  }
+
+  /** Leaving is always allowed; removing somebody else needs standing. */
+  function canRemove(member: OrgMember) {
+    return (
+      member.user_id === user?.id || canManageOrgRole(viewerRole, member.role)
+    );
+  }
 
   /**
    * Demoting yourself is the one role change that rewrites what this page is
    * allowed to do, so it is confirmed before it runs rather than silently
-   * pulling the admin controls out from under the click.
+   * pulling the controls out from under the click.
    */
   function requestRoleChange(member: OrgMember, role: OrgRole) {
-    if (!isAdmin || member.role === role || busyMemberId) return;
-    if (member.user_id === user?.id && role !== "admin") {
+    if (!canChangeRole(member, role) || member.role === role || busyMemberId)
+      return;
+    if (member.user_id === user?.id) {
       setPendingSelfRoleChange({ member, role });
       return;
     }
@@ -249,7 +323,8 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
   }
 
   async function changeRole(member: OrgMember, role: OrgRole) {
-    if (!isAdmin || member.role === role || busyMemberId) return;
+    if (!canChangeRole(member, role) || member.role === role || busyMemberId)
+      return;
     setBusyMemberId(member.user_id);
     setActionError(null);
     try {
@@ -260,12 +335,16 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
         ),
       );
       // The membership row is not the only place this role lives: `org.role`
-      // gates every admin-only control and request on the page. Without this
-      // the demoted admin keeps a UI they no longer have rights for, and each
-      // action 403s until a reload.
+      // gates every owner- and admin-only control and request on the page.
+      // Without this the demoted person keeps a UI they no longer have rights
+      // for, and each action 403s until a reload.
       if (member.user_id === user?.id) {
         setOrg((current) => (current ? { ...current, role } : current));
-        if (role !== "admin") setInvitations([]);
+        if (!isOrgAdmin(role)) setInvitations([]);
+        // The settings area offers different sections to a different role,
+        // and the workspace switcher shows it too.
+        onViewerRoleChanged?.();
+        void refreshOrganizations();
       }
     } catch (error) {
       setActionError(userFacingApiError(error, "Could not change that role."));
@@ -274,32 +353,29 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
     }
   }
 
-  async function confirmRemoveMember() {
-    if (!removeMember || busyMemberId) return;
+  // The dialog has done the removing (and the handing over); this is what
+  // the page does about it.
+  function finishRemoveMember(result: MemberDepartureResult) {
     const member = removeMember;
-    setBusyMemberId(member.user_id);
-    setActionError(null);
-    try {
-      await removeOrgMember(orgId, member.user_id);
-      if (member.user_id === user?.id) {
-        router.push("/organizations");
-        return;
-      }
-      setMembers((current) =>
-        current.filter((row) => row.user_id !== member.user_id),
-      );
-      setSelectedMemberIds((current) =>
-        current.filter((id) => id !== member.id),
-      );
-      setRemoveMember(null);
-    } catch (error) {
+    setRemoveMember(null);
+    if (!member) return;
+    if (!result.removedUserIds.includes(member.user_id)) {
       setActionError(
-        userFacingApiError(error, "Could not remove that member."),
+        userFacingApiError(result.error, "Could not remove that member."),
       );
-      setRemoveMember(null);
-    } finally {
-      setBusyMemberId(null);
+      return;
     }
+    if (member.user_id === user?.id) {
+      void refreshOrganizations();
+      router.push(AFTER_DEPARTURE);
+      return;
+    }
+    setMembers((current) =>
+      current.filter((row) => row.user_id !== member.user_id),
+    );
+    setSelectedMemberIds((current) =>
+      current.filter((id) => id !== member.id),
+    );
   }
 
   function requestRemoveSelected() {
@@ -311,41 +387,38 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
       setActionError("Use Leave organization to remove yourself.");
       return;
     }
+    if (
+      selectedMembers.some(
+        (member) => !canManageOrgRole(viewerRole, member.role),
+      )
+    ) {
+      setActionError(
+        "Only an organization owner can remove admins and other owners.",
+      );
+      return;
+    }
     setRemoveSelectedOpen(true);
   }
 
-  async function confirmRemoveSelected() {
-    if (!isAdmin || removingSelected || selectedMemberIds.length === 0) return;
-    const selectedMembers = members.filter((member) =>
-      selectedMemberIds.includes(member.id),
-    );
-    setRemovingSelected(true);
-    setActionError(null);
-    const results = await Promise.allSettled(
-      selectedMembers.map((member) => removeOrgMember(orgId, member.user_id)),
-    );
-    const removedIds = selectedMembers
-      .filter((_, index) => results[index]?.status === "fulfilled")
+  function finishRemoveSelected(result: MemberDepartureResult) {
+    const removedIds = members
+      .filter((member) => result.removedUserIds.includes(member.user_id))
       .map((member) => member.id);
-    const firstFailure = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
     setMembers((current) =>
       current.filter((member) => !removedIds.includes(member.id)),
     );
     setSelectedMemberIds((current) =>
       current.filter((id) => !removedIds.includes(id)),
     );
-    if (firstFailure) {
+    if (result.error) {
       setActionError(
         userFacingApiError(
-          firstFailure.reason,
+          result.error,
           "Could not remove all selected members.",
         ),
       );
     }
     setRemoveSelectedOpen(false);
-    setRemovingSelected(false);
   }
 
   function renderMemberActions(
@@ -357,11 +430,7 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
       selectedMemberIds.includes(member.id) &&
       selectedMemberIds.length > 1 &&
       isAdmin;
-    if (
-      !appliesToSelection &&
-      (!member || (!isAdmin && member.user_id !== user?.id))
-    )
-      return null;
+    if (!appliesToSelection && (!member || !canRemove(member))) return null;
     return (
       <DropdownItem
         variant="destructive"
@@ -381,10 +450,10 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
     );
   }
 
-  const peopleToolbarActions =
-    activeTab === "people" && isAdmin && selectedMemberIds.length > 0 ? (
+  const selectionActions =
+    isAdmin && selectedMemberIds.length > 0 ? (
       <SelectionActionsMenu renderItems={(close) => renderMemberActions(members.find((member) => member.id === selectedMemberIds[0]), close)} />
-    ) : undefined;
+    ) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
@@ -392,106 +461,81 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
         loading={loading}
         breadcrumbs={[
           {
-            label: "Organizations",
-            onClick: () => router.push("/organizations"),
-            title: "Back to Organizations",
+            label: "Organization Settings",
+            onClick: () => router.push(`/organizations/${orgId}/settings`),
+            title: "Back to Organization Settings",
           },
-          org
-            ? { label: org.name, cursor: "text" }
-            : { loading: true, skeletonClassName: "w-40" },
+          { label: "Members", cursor: "text" },
         ]}
-        actionGroups={[
-          [
-            {
-              type: "new",
-              title: isAdmin
-                ? "Add member"
-                : "Only organization admins can add members",
-              disabled: !isAdmin,
-              onClick: () => {
-                setInviteOpen(true);
-                // The modal shows the invitation list this page loaded, which
-                // by now may name people who have already accepted.
-                void refreshPeople();
-              },
+        actions={[
+          {
+            type: "search",
+            value: search,
+            onChange: (value) => {
+              setSearch(value);
+              // A selection made in one result set does not carry into
+              // another, where some of it would be out of sight.
+              setSelectedMemberIds([]);
             },
-            isAdmin
-              ? {
-                  type: "custom",
-                  render: (
-                    <HeaderActionsMenu
-                      title="Organization settings"
-                      items={[
-                        {
-                          label: "Organization settings",
-                          icon: Pencil,
-                          onSelect: () => setSettingsOpen(true),
-                        },
-                      ]}
-                    />
-                  ),
-                }
-              : null,
-          ],
+            placeholder:
+              tab === "departed" ? "Search departed members…" : "Search members…",
+          },
+          {
+            type: "new",
+            title: isAdmin
+              ? "Add member"
+              : "Only organization admins can add members",
+            disabled: !isAdmin,
+            onClick: () => {
+              setInviteOpen(true);
+              // The modal shows the invitation list this page loaded, which
+              // by now may name people who have already accepted.
+              void refreshPeople();
+            },
+          },
         ]}
       />
 
-      <TableToolbar
-        items={TABS}
-        active={activeTab}
-        onChange={(tab) => {
-          setActiveTab(tab);
-          setSelectedMemberIds([]);
-        }}
-        actions={peopleToolbarActions}
-      />
-
-      {activeTab === "people" ? (
-        <PeopleTable
-          loading={loading}
-          error={loadError}
+      {tab === "departed" ? (
+        <OrganizationDepartedMembers
+          orgId={orgId}
           members={members}
-          selectedMemberIds={selectedMemberIds}
-          onSelectedMemberIdsChange={setSelectedMemberIds}
-          currentUserId={user?.id ?? null}
-          isAdmin={isAdmin}
-          busyMemberId={busyMemberId}
-          onRetry={load}
-          onRoleChange={requestRoleChange}
-          onRemove={setRemoveMember}
-          renderActions={renderMemberActions}
-        />
-      ) : activeTab === "projects" ? (
-        <ResourceTable
-          key="projects"
-          loading={loading}
-          error={loadError}
-          kind="projects"
-          rows={resources.projects.map((project) => ({
-            id: project.id,
-            name: resourceName(project.name, "Untitled project"),
-            context: project.practice || "—",
-            createdAt: project.created_at,
-            href: `/projects/${project.id}`,
-          }))}
-          onRetry={load}
+          search={search}
+          renderToolbar={(actions) => (
+            <TableToolbar
+              items={tabs}
+              active={tab}
+              onChange={changeTab}
+              actions={actions}
+            />
+          )}
         />
       ) : (
-        <ResourceTable
-          key="workflows"
-          loading={loading}
-          error={loadError}
-          kind="workflows"
-          rows={resources.workflows.map((workflow) => ({
-            id: workflow.id,
-            name: resourceName(workflow.title, "Untitled workflow"),
-            context:
-              workflow.type === "tabular" ? "Tabular review" : "Assistant",
-            createdAt: workflow.created_at,
-            href: `/workflows/${workflow.id}`,
-          }))}
-          onRetry={load}
-        />
+        <>
+          <TableToolbar
+            items={tabs}
+            active={tab}
+            onChange={changeTab}
+            actions={selectionActions ?? undefined}
+          />
+
+          <PeopleTable
+            loading={loading}
+            error={loadError}
+            members={members}
+            search={search}
+            roleFilter={tab === "all" ? null : tab}
+            selectedMemberIds={selectedMemberIds}
+            onSelectedMemberIdsChange={setSelectedMemberIds}
+            currentUserId={user?.id ?? null}
+            viewerRole={viewerRole}
+            busyMemberId={busyMemberId}
+            onRetry={load}
+            onRoleChange={requestRoleChange}
+            onRemove={setRemoveMember}
+            renderActions={renderMemberActions}
+          />
+        </>
       )}
 
       {org ? (
@@ -511,44 +555,31 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
             }}
             onChanged={refreshPeople}
           />
-          <OrganizationSettingsModal
-            open={settingsOpen}
-            org={org}
-            onClose={() => setSettingsOpen(false)}
-            onUpdated={(updated) => {
-              setOrg((current) => ({
-                ...updated,
-                member_count: current?.member_count,
-              }));
-              setSettingsOpen(false);
-            }}
-            onDeleted={() => router.push("/organizations")}
-          />
         </>
       ) : null}
 
-      <ConfirmPopup
-        open={removeMember !== null}
-        title={
-          removeMember?.user_id === user?.id
-            ? "Leave organization?"
-            : "Remove member?"
-        }
-        message={
-          removeMember?.user_id === user?.id
-            ? "You will lose access to this organization's shared resources."
-            : `${removeMember?.display_name || removeMember?.email || "This member"} will lose organization access.`
-        }
-        confirmLabel={removeMember?.user_id === user?.id ? "Leave" : "Remove"}
-        confirmVariant="danger"
-        confirmStatus={busyMemberId ? "loading" : "idle"}
-        onCancel={() => setRemoveMember(null)}
-        onConfirm={() => void confirmRemoveMember()}
-      />
+      {removeMember ? (
+        <MemberDepartureDialog
+          orgId={orgId}
+          departing={[removeMember]}
+          leaving={removeMember.user_id === user?.id}
+          members={members}
+          onCancel={() => setRemoveMember(null)}
+          onDone={finishRemoveMember}
+        />
+      ) : null}
       <ConfirmPopup
         open={pendingSelfRoleChange !== null}
-        title="Give up admin access?"
-        message="You will lose admin access to this organization and can no longer manage its people, settings or invitations."
+        title={
+          pendingSelfRoleChange?.role === "admin"
+            ? "Step down to admin?"
+            : "Give up owner access?"
+        }
+        message={
+          pendingSelfRoleChange?.role === "admin"
+            ? "You will stay an admin, but can no longer delete this organization or appoint and remove its admins and owners."
+            : "You will lose owner access to this organization and can no longer manage its people, settings or invitations."
+        }
         confirmLabel="Continue"
         confirmStatus={busyMemberId ? "loading" : "idle"}
         onCancel={() => {
@@ -567,16 +598,17 @@ export function OrganizationWorkspace({ orgId }: { orgId: string }) {
           );
         }}
       />
-      <ConfirmPopup
-        open={removeSelectedOpen}
-        title="Remove selected people?"
-        message={`${selectedMemberIds.length} selected ${selectedMemberIds.length === 1 ? "member" : "members"} will lose access to this organization.`}
-        confirmLabel="Remove"
-        confirmVariant="danger"
-        confirmStatus={removingSelected ? "loading" : "idle"}
-        onCancel={() => setRemoveSelectedOpen(false)}
-        onConfirm={() => void confirmRemoveSelected()}
-      />
+      {removeSelectedOpen ? (
+        <MemberDepartureDialog
+          orgId={orgId}
+          departing={members.filter((member) =>
+            selectedMemberIds.includes(member.id),
+          )}
+          members={members}
+          onCancel={() => setRemoveSelectedOpen(false)}
+          onDone={finishRemoveSelected}
+        />
+      ) : null}
       <WarningPopup
         open={actionError !== null}
         title="Organization action failed"
@@ -591,10 +623,12 @@ function PeopleTable({
   loading,
   error,
   members,
+  search,
+  roleFilter,
   selectedMemberIds,
   onSelectedMemberIdsChange,
   currentUserId,
-  isAdmin,
+  viewerRole,
   busyMemberId,
   onRetry,
   onRoleChange,
@@ -604,29 +638,42 @@ function PeopleTable({
   loading: boolean;
   error: string | null;
   members: OrgMember[];
+  /** Narrows the roster to people whose name or email contains it. */
+  search: string;
+  /** The role the open tab shows, or null for everyone. */
+  roleFilter: OrgRole | null;
   selectedMemberIds: string[];
   onSelectedMemberIdsChange: Dispatch<SetStateAction<string[]>>;
   currentUserId: string | null;
-  isAdmin: boolean;
+  /** The viewer's own organization role; null while it is still loading. */
+  viewerRole: OrgRole | null;
   busyMemberId: string | null;
   onRetry: () => Promise<void>;
   onRoleChange: (member: OrgMember, role: OrgRole) => void;
   onRemove: (member: OrgMember) => void;
   renderActions: (member: OrgMember, close?: () => void) => ReactNode;
 }) {
-  const [roleFilter, setRoleFilter] = useState<OrgRole | null>(null);
   const [sort, setSort] = useState<{
     key: "name" | "email" | "added";
     direction: TableSortDirection;
   } | null>(null);
   const visibleMembers = useMemo(() => {
-    const filtered = roleFilter
-      ? members.filter((member) => member.role === roleFilter)
-      : members;
-    if (!sort) return filtered;
-    const multiplier = sort.direction === "asc" ? 1 : -1;
+    const query = search.trim().toLowerCase();
+    const filtered = members.filter(
+      (member) =>
+        (!roleFilter || member.role === roleFilter) &&
+        (!query ||
+          (member.display_name ?? "").toLowerCase().includes(query) ||
+          (member.email ?? "").toLowerCase().includes(query)),
+    );
+    // Owners, then admins, then members — always. A column sort orders the
+    // people within each of those; with none chosen they are listed by name.
+    const key = sort?.key ?? "name";
+    const multiplier = sort?.direction === "desc" ? -1 : 1;
     return [...filtered].sort((a, b) => {
-      if (sort.key === "added") {
+      const byRole = ROLE_ORDER[a.role] - ROLE_ORDER[b.role];
+      if (byRole !== 0) return byRole;
+      if (key === "added") {
         return (
           (new Date(a.created_at ?? 0).getTime() -
             new Date(b.created_at ?? 0).getTime()) *
@@ -634,16 +681,32 @@ function PeopleTable({
         );
       }
       const aValue =
-        sort.key === "email"
+        key === "email"
           ? (a.email ?? "")
           : a.display_name || a.email || a.user_id;
       const bValue =
-        sort.key === "email"
+        key === "email"
           ? (b.email ?? "")
           : b.display_name || b.email || b.user_id;
       return aValue.localeCompare(bValue) * multiplier;
     });
-  }, [members, roleFilter, sort]);
+  }, [members, roleFilter, search, sort]);
+
+  // Rows are drawn a page at a time, and more as the list is scrolled, like
+  // the app's other tables. The roster is already in hand, so "loading" the
+  // next page is only a matter of drawing it. A different search, filter or
+  // sort is a different list and starts again from its first page.
+  const listKey = `${search}|${roleFilter ?? ""}|${sort?.key ?? ""}|${sort?.direction ?? ""}`;
+  const [page, setPage] = useState({ listKey, count: MEMBERS_PAGE_SIZE });
+  if (page.listKey !== listKey)
+    setPage({ listKey, count: MEMBERS_PAGE_SIZE });
+  const shownMembers = visibleMembers.slice(0, page.count);
+  const hasMoreMembers = shownMembers.length < visibleMembers.length;
+  const showMoreMembers = () =>
+    setPage((current) => ({
+      ...current,
+      count: current.count + MEMBERS_PAGE_SIZE,
+    }));
   const allSelected =
     visibleMembers.length > 0 &&
     visibleMembers.every((member) => selectedMemberIds.includes(member.id));
@@ -695,10 +758,22 @@ function PeopleTable({
                 aria-label="Select all people"
               />
             )}
-            <span className="mr-1">Username</span>
+            {/* How many people the open tab and the search come to, drawn
+                or not. Plain text beside the column's name. */}
+            <span className="mr-1">
+              Name
+              {!loading && !error ? (
+                <>
+                  {" "}
+                  <span className="font-normal text-gray-400">
+                    ({visibleMembers.length})
+                  </span>
+                </>
+              ) : null}
+            </span>
             {!loading ? (
               <TableSortFilter
-                label="Sort by username"
+                label="Sort by name"
                 value={sort?.key === "name" ? sort.direction : null}
                 allLabel="Default order"
                 align="right"
@@ -719,19 +794,6 @@ function PeopleTable({
           </TableHeaderCell>
           <TableHeaderCell className="w-32">
             <span className="mr-1">Role</span>
-            {!loading ? (
-              <TableFilters
-                label="Filter by role"
-                value={roleFilter}
-                allLabel="All roles"
-                options={ROLE_FILTER_OPTIONS}
-                widthClassName="w-36"
-                onChange={(role) => {
-                  setRoleFilter(role);
-                  onSelectedMemberIdsChange([]);
-                }}
-              />
-            ) : null}
           </TableHeaderCell>
           <TableHeaderCell className="w-36">
             <span className="mr-1">Added</span>
@@ -762,13 +824,31 @@ function PeopleTable({
         </TableEmptyState>
       ) : visibleMembers.length === 0 ? (
         <TableEmptyState>
-          <p className="text-sm text-gray-400">No people match this filter.</p>
+          <p className="text-sm text-gray-400">
+            {search.trim()
+              ? "No people match this search."
+              : `This organization has no ${
+                  roleFilter === "owner"
+                    ? "owners"
+                    : roleFilter === "admin"
+                      ? "admins"
+                      : "ordinary members"
+                }.`}
+          </p>
         </TableEmptyState>
       ) : (
         <TableBody>
-          {visibleMembers.map((member) => {
+          {shownMembers.map((member) => {
             const label = member.display_name || member.email || member.user_id;
-            const canRemove = isAdmin || member.user_id === currentUserId;
+            const canRemove =
+              member.user_id === currentUserId ||
+              canManageOrgRole(viewerRole, member.role);
+            // The roles the viewer may hand this member. With one or none
+            // there is nothing to choose, so the role renders as plain text
+            // instead of a menu that could only fail.
+            const assignableRoles = canManageOrgRole(viewerRole, member.role)
+              ? ORG_ROLES.filter((role) => canManageOrgRole(viewerRole, role))
+              : [];
             const isSelected = selectedMemberIds.includes(member.id);
             return (
               <TableRow
@@ -799,7 +879,7 @@ function PeopleTable({
                   <OrganizationRoleTab
                     role={member.role}
                     label={label}
-                    editable={isAdmin}
+                    assignableRoles={assignableRoles}
                     disabled={busyMemberId === member.user_id}
                     onChange={(role) => onRoleChange(member, role)}
                   />
@@ -830,6 +910,15 @@ function PeopleTable({
           })}
         </TableBody>
       )}
+      <TableLoadMoreRow
+        loading={loading}
+        hasMore={hasMoreMembers}
+        itemCount={shownMembers.length}
+        loadingMore={false}
+        hasError={false}
+        onLoadMore={showMoreMembers}
+        autoLoadOnVisible
+      />
     </TableScrollArea>
   );
 }
@@ -837,20 +926,23 @@ function PeopleTable({
 function OrganizationRoleTab({
   role,
   label,
-  editable,
+  assignableRoles,
   disabled,
   onChange,
 }: {
   role: OrgRole;
   label: string;
-  editable: boolean;
+  assignableRoles: OrgRole[];
   disabled: boolean;
   onChange: (role: OrgRole) => void;
 }) {
+  const editable = assignableRoles.length > 1;
   const tone =
-    role === "admin"
+    role === "owner"
       ? "bg-blue-100 text-blue-700"
-      : "bg-violet-100 text-violet-700";
+      : role === "admin"
+        ? "bg-violet-100 text-violet-700"
+        : "bg-gray-100 text-gray-600";
   const className = `inline-flex h-6 min-w-20 items-center justify-center gap-1 rounded-full px-2 text-[11px] font-medium ${tone}`;
 
   if (!editable) {
@@ -875,7 +967,9 @@ function OrganizationRoleTab({
         </button>
       </DropdownTrigger>
       <DropdownContent align="start" className="w-36">
-        {ROLE_FILTER_OPTIONS.map((option) => (
+        {ROLE_FILTER_OPTIONS.filter((option) =>
+          assignableRoles.includes(option.value),
+        ).map((option) => (
           <DropdownItem
             key={option.value}
             selected={role === option.value}
@@ -890,218 +984,6 @@ function OrganizationRoleTab({
         ))}
       </DropdownContent>
     </Dropdown>
-  );
-}
-
-type ResourceKind = "projects" | "workflows";
-type ResourceRow = {
-  id: string;
-  name: string;
-  context: string;
-  createdAt: string | null;
-  href: string;
-};
-
-function ResourceTable({
-  loading,
-  error,
-  kind,
-  rows,
-  onRetry,
-}: {
-  loading: boolean;
-  error: string | null;
-  kind: ResourceKind;
-  rows: ResourceRow[];
-  onRetry: () => Promise<void>;
-}) {
-  const router = useRouter();
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [contextFilter, setContextFilter] = useState<string | null>(null);
-  const [sort, setSort] = useState<{
-    key: "name" | "created";
-    direction: TableSortDirection;
-  } | null>(null);
-  const copy = {
-    projects: {
-      title: "Projects",
-      context: "Practice",
-      empty: "No projects belong to this organization.",
-      icon: <ClosedProjectSvgIcon />,
-    },
-    workflows: {
-      title: "Workflows",
-      context: "Type",
-      empty: "No workflows belong to this organization.",
-      icon: <WorkflowSkeuoIcon />,
-    },
-  }[kind];
-  const contextOptions = useMemo<TableFilterOption<string>[]>(
-    () =>
-      [...new Set(rows.map((row) => row.context))]
-        .sort((a, b) => a.localeCompare(b))
-        .map((context) => ({ value: context, label: context })),
-    [rows],
-  );
-  const visibleRows = useMemo(() => {
-    const filtered = contextFilter
-      ? rows.filter((row) => row.context === contextFilter)
-      : rows;
-    if (!sort) return filtered;
-    const multiplier = sort.direction === "asc" ? 1 : -1;
-    return [...filtered].sort((a, b) => {
-      if (sort.key === "name") return a.name.localeCompare(b.name) * multiplier;
-      return (
-        (new Date(a.createdAt ?? 0).getTime() -
-          new Date(b.createdAt ?? 0).getTime()) *
-        multiplier
-      );
-    });
-  }, [contextFilter, rows, sort]);
-  const allSelected =
-    visibleRows.length > 0 &&
-    visibleRows.every((row) => selectedIds.includes(row.id));
-  const someSelected =
-    !allSelected && visibleRows.some((row) => selectedIds.includes(row.id));
-
-  function setSortFor(
-    key: "name" | "created",
-    direction: TableSortDirection | null,
-  ) {
-    setSort(direction ? { key, direction } : null);
-    setSelectedIds([]);
-  }
-
-  function toggleAllVisible() {
-    const visibleIds = visibleRows.map((row) => row.id);
-    setSelectedIds((current) =>
-      allSelected
-        ? current.filter((id) => !visibleIds.includes(id))
-        : [...new Set([...current, ...visibleIds])],
-    );
-  }
-
-  function toggleRow(rowId: string) {
-    setSelectedIds((current) =>
-      current.includes(rowId)
-        ? current.filter((id) => id !== rowId)
-        : [...current, rowId],
-    );
-  }
-
-  return (
-    <TableScrollArea
-      header={
-        <TableHeaderRow>
-          <TableStickyCell header>
-            {loading ? (
-              <SkeletonCheckbox />
-            ) : (
-              <input
-                type="checkbox"
-                checked={allSelected}
-                ref={(element) => {
-                  if (element) element.indeterminate = someSelected;
-                }}
-                onChange={toggleAllVisible}
-                className={TABLE_CHECKBOX_CLASS}
-                aria-label={`Select all ${kind}`}
-              />
-            )}
-            <span className="mr-1">Name</span>
-            {!loading ? (
-              <TableSortFilter
-                label={`Sort ${kind} by name`}
-                value={sort?.key === "name" ? sort.direction : null}
-                allLabel="Default order"
-                align="right"
-                onChange={(direction) => setSortFor("name", direction)}
-              />
-            ) : null}
-          </TableStickyCell>
-          <TableHeaderCell className="ml-auto w-48">
-            <span className="mr-1">{copy.context}</span>
-            {!loading ? (
-              <TableFilters
-                label={`Filter ${kind} by ${copy.context.toLowerCase()}`}
-                value={contextFilter}
-                allLabel={`All ${copy.context.toLowerCase()}s`}
-                options={contextOptions}
-                widthClassName="w-44"
-                onChange={(context) => {
-                  setContextFilter(context);
-                  setSelectedIds([]);
-                }}
-              />
-            ) : null}
-          </TableHeaderCell>
-          <TableHeaderCell className="w-36">
-            <span className="mr-1">Created</span>
-            {!loading ? (
-              <TableSortFilter
-                label={`Sort ${kind} by creation date`}
-                value={sort?.key === "created" ? sort.direction : null}
-                allLabel="Default order"
-                onChange={(direction) => setSortFor("created", direction)}
-              />
-            ) : null}
-          </TableHeaderCell>
-        </TableHeaderRow>
-      }
-    >
-      {loading ? (
-        <LoadingRows columns={["w-48", "w-36"]} />
-      ) : error ? (
-        <ErrorState error={error} onRetry={onRetry} />
-      ) : rows.length === 0 ? (
-        <TableEmptyState>
-          <EmptyState
-            icon={copy.icon}
-            title={copy.title}
-            description={copy.empty}
-          />
-        </TableEmptyState>
-      ) : visibleRows.length === 0 ? (
-        <TableEmptyState>
-          <p className="text-sm text-gray-400">No {kind} match this filter.</p>
-        </TableEmptyState>
-      ) : (
-        <TableBody>
-          {visibleRows.map((row) => (
-            <TableRow
-              key={row.id}
-              selected={selectedIds.includes(row.id)}
-              role="link"
-              tabIndex={0}
-              aria-label={`Open ${row.name}`}
-              onClick={() => router.push(row.href)}
-              onKeyDown={(event) => {
-                if (event.target !== event.currentTarget) return;
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  router.push(row.href);
-                }
-              }}
-              className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/40"
-            >
-              <TablePrimaryCell
-                selected={selectedIds.includes(row.id)}
-                onSelectionChange={() => toggleRow(row.id)}
-                checkboxTitle={`Select ${row.name}`}
-              >
-                <span className="min-w-0 flex-1 truncate text-xs text-gray-800">
-                  {row.name}
-                </span>
-              </TablePrimaryCell>
-              <TableCell className="ml-auto w-48">{row.context}</TableCell>
-              <TableCell className="w-36">
-                {formatDate(row.createdAt)}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      )}
-    </TableScrollArea>
   );
 }
 

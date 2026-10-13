@@ -9,8 +9,16 @@ import { requireAuth, requireMfaIfEnrolled } from "../../middleware/auth";
 import { asyncRoute, routerErrorHandler } from "../../middleware/asyncRoute";
 import { createServerSupabase } from "../../lib/supabase";
 import { sendInternalError } from "../../lib/httpError";
+import {
+  DOCUMENT_WORKSPACE_MISMATCH_CODE,
+  DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+} from "../../lib/documentWorkspace";
 import { parsePaginationQuery } from "../../lib/pagination";
 import { normalizeSearchTerm } from "../../lib/search";
+import {
+  resolveWorkspaceFilter,
+  sendWorkspaceFailure,
+} from "../../lib/workspace";
 import { parseProjectSort } from "../../lib/sort";
 import { parseProjectScope } from "./projects.overview";
 import {
@@ -68,6 +76,7 @@ const PROJECT_PAGINATION_QUERY_KEYS = [
   "scope",
   "practice",
   "owner_user_id",
+  "workspace",
 ];
 
 projectsRouter.get("/", requireAuth, asyncRoute(async (req, res) => {
@@ -82,21 +91,35 @@ projectsRouter.get("/", requireAuth, asyncRoute(async (req, res) => {
   if (req.query.view === "directory-search") {
     const searchTerm = normalizeSearchTerm(req.query.search);
     if (!searchTerm) return void res.json([]);
+    const workspace = await resolveWorkspaceFilter(
+      db,
+      userId,
+      req.query.workspace,
+    );
+    if (!workspace.ok) return void sendWorkspaceFailure(res, workspace);
     const result = await searchProjectDirectory(db, {
       userId,
       userEmail,
       searchTerm,
       pagination: parsePaginationQuery(req.query as Record<string, unknown>),
+      workspace: workspace.workspace,
     });
     if (!result.ok) return void sendInternalError(res, result.error);
     return void res.json(result.data);
   }
 
   if (req.query.view === "summary") {
+    const workspace = await resolveWorkspaceFilter(
+      db,
+      userId,
+      req.query.workspace,
+    );
+    if (!workspace.ok) return void sendWorkspaceFailure(res, workspace);
     const result = await getProjectSummaries(db, {
       userId,
       userEmail,
       pagination: parsePaginationQuery(req.query as Record<string, unknown>),
+      workspace: workspace.workspace,
     });
     if (!result.ok) return void sendInternalError(res, result.error);
     return void res.json(result.data);
@@ -105,6 +128,12 @@ projectsRouter.get("/", requireAuth, asyncRoute(async (req, res) => {
   const hasPaginationParams = PROJECT_PAGINATION_QUERY_KEYS.some(
     (key) => req.query[key] !== undefined,
   );
+  const workspace = await resolveWorkspaceFilter(
+    db,
+    userId,
+    req.query.workspace,
+  );
+  if (!workspace.ok) return void sendWorkspaceFailure(res, workspace);
 
   const result = await getProjectsOverview(db, {
     userId,
@@ -120,6 +149,7 @@ projectsRouter.get("/", requireAuth, asyncRoute(async (req, res) => {
           sort: parseProjectSort(req.query as Record<string, unknown>),
           practice: normalizeSearchTerm(req.query.practice),
           ownerUserId: normalizeSearchTerm(req.query.owner_user_id),
+          workspace: workspace.workspace,
         }
       : undefined,
   });
@@ -139,13 +169,15 @@ projectsRouter.post("/", requireAuth, asyncRoute(async (req, res) => {
       detail:
         "shared_with is no longer supported; use the project access endpoints.",
     });
-  const { name, cm_number, practice, org_id, memory_enabled } = req.body as {
-    name: string;
-    cm_number?: string;
-    practice?: string;
-    org_id?: string | null;
-    memory_enabled?: boolean;
-  };
+  const { name, cm_number, practice, org_id, visibility, memory_enabled } =
+    req.body as {
+      name: string;
+      cm_number?: string;
+      practice?: string;
+      org_id?: string | null;
+      visibility?: unknown;
+      memory_enabled?: boolean;
+    };
   const db = createServerSupabase();
 
   const result = await createProject(db, {
@@ -154,6 +186,7 @@ projectsRouter.post("/", requireAuth, asyncRoute(async (req, res) => {
     cm_number,
     practice,
     org_id,
+    visibility,
     memory_enabled,
   });
   if (!result.ok) {
@@ -193,8 +226,18 @@ projectsRouter.get("/filter-options", requireAuth, asyncRoute(async (req, res) =
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
   const db = createServerSupabase();
+  const workspace = await resolveWorkspaceFilter(
+    db,
+    userId,
+    req.query.workspace,
+  );
+  if (!workspace.ok) return void sendWorkspaceFailure(res, workspace);
 
-  const result = await getProjectFilterOptions(db, { userId, userEmail });
+  const result = await getProjectFilterOptions(db, {
+    userId,
+    userEmail,
+    workspace: workspace.workspace,
+  });
   if (!result.ok) return void sendInternalError(res, result.error);
   res.json(result.body);
 }));
@@ -207,6 +250,12 @@ projectsRouter.get("/ids", requireAuth, asyncRoute(async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
   const db = createServerSupabase();
+  const workspace = await resolveWorkspaceFilter(
+    db,
+    userId,
+    req.query.workspace,
+  );
+  if (!workspace.ok) return void sendWorkspaceFailure(res, workspace);
 
   const result = await listProjectIds(db, {
     userId,
@@ -215,6 +264,7 @@ projectsRouter.get("/ids", requireAuth, asyncRoute(async (req, res) => {
     searchTerm: normalizeSearchTerm(req.query.search),
     practice: normalizeSearchTerm(req.query.practice),
     ownerUserId: normalizeSearchTerm(req.query.owner_user_id),
+    workspace: workspace.workspace,
   });
   if (!result.ok) return void sendInternalError(res, result.error);
   res.json(result.ids);
@@ -356,6 +406,8 @@ projectsRouter.patch("/:projectId", requireAuth, asyncRoute(async (req, res) => 
   if (!result.ok) {
     if (result.kind === "forbidden")
       return void res.status(403).json({ detail: result.detail });
+    if (result.kind === "validation")
+      return void res.status(400).json({ detail: result.detail });
     if (result.kind === "db_error")
       return void sendInternalError(res, result.error);
     return void res.status(404).json({ detail: "Project not found" });
@@ -461,6 +513,11 @@ projectsRouter.post(
           return void res.status(403).json({ detail: result.detail });
         case "doc_not_found":
           return void res.status(404).json({ detail: "Document not found" });
+        case "workspace_mismatch":
+          return void res.status(400).json({
+            code: DOCUMENT_WORKSPACE_MISMATCH_CODE,
+            detail: DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+          });
         case "no_active_version":
           return void res
             .status(404)

@@ -14,7 +14,7 @@ import type { Db } from "../../lib/supabase";
 import { ollamaAuthHeaders as authHeaders } from "../../lib/llm/providers";
 import { isSupportedOpenCodeGoModel } from "../../lib/llm/models";
 import { configuredEndpointSummaries } from "../../lib/llm/registry";
-import { getUserApiKeys } from "../user/user.service";
+import { getEffectiveApiKeys, getUserApiKeys } from "../user/user.service";
 
 export type CatalogPricing = {
     input?: string;
@@ -140,9 +140,10 @@ export async function listConfiguredModels(
 export async function listOpenRouterModels(
     db: Db,
     userId: string,
+    orgId?: string | null,
 ): Promise<CatalogResult> {
     try {
-        const apiKeys = await getUserApiKeys(userId, db);
+        const apiKeys = await getEffectiveApiKeys(userId, orgId, db);
         const key = apiKeys.openrouter?.trim();
         if (!key) {
             return missingApiKey(
@@ -204,9 +205,10 @@ export async function listOpenRouterModels(
 export async function listVercelModels(
     db: Db,
     userId: string,
+    orgId?: string | null,
 ): Promise<CatalogResult> {
     try {
-        const apiKeys = await getUserApiKeys(userId, db);
+        const apiKeys = await getEffectiveApiKeys(userId, orgId, db);
         if (!apiKeys.vercel?.trim()) {
             return missingApiKey(
                 "A Vercel AI Gateway API key is required to list models.",
@@ -298,9 +300,10 @@ export async function listVercelModels(
 export async function listOpenCodeGoModels(
     db: Db,
     userId: string,
+    orgId?: string | null,
 ): Promise<CatalogResult> {
     try {
-        const apiKeys = await getUserApiKeys(userId, db);
+        const apiKeys = await getEffectiveApiKeys(userId, orgId, db);
         const key = apiKeys["opencode-go"]?.trim();
         if (!key) {
             return missingApiKey(

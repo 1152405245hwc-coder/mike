@@ -97,23 +97,31 @@ maybeDescribe("get_chats_overview — role-aware grants", () => {
         if (members.error) throw members.error;
 
         const projects = await admin.from("projects").insert([
-            { id: myProjectId, user_id: callerId, name: `mine-${suffix}` },
+            {
+                id: myProjectId,
+                user_id: callerId,
+                name: `mine-${suffix}`,
+                visibility: "private",
+            },
             {
                 id: sharedOrgProjectId,
                 user_id: strangerId,
                 name: `org-${suffix}`,
                 org_id: sharedOrgId,
+                visibility: "organization",
             },
             {
                 id: grantedProjectId,
                 user_id: strangerId,
                 name: `granted-${suffix}`,
+                visibility: "private",
             },
             {
                 id: foreignOrgProjectId,
                 user_id: strangerId,
                 name: `foreign-${suffix}`,
                 org_id: foreignOrgId,
+                visibility: "organization",
             },
         ]);
         if (projects.error) throw projects.error;
@@ -129,11 +137,9 @@ maybeDescribe("get_chats_overview — role-aware grants", () => {
         ]);
         if (grants.error) throw grants.error;
 
-        // Chats with no project carry org_id null — there is no personal
-        // organization to park them in. Stamping the fixtures the way
-        // resolveContentOrgId stamps real rows is what makes the "the chat's
-        // own org branch can never add a row" claim in 20260902_05's header
-        // testable rather than merely asserted.
+        // Keep legacy personal rows with org_id null to exercise their
+        // creator/direct-grant access. Organization chats inherit the
+        // explicitly public project's visibility.
         const chatRows = await admin.from("chats").insert([
             {
                 id: chats.mine,

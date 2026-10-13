@@ -7,7 +7,9 @@ import {
   getLibraryFolderChildren,
   listProjectSummaries,
   type LibraryKind,
+  type LibraryScope,
 } from "@/app/lib/mikeApi";
+import { useDocumentWorkspace } from "@/app/contexts/WorkspaceContext";
 import type { Document, LibraryFolder, Project } from "./types";
 
 export type DirectoryTab = "files" | "templates" | "projects";
@@ -55,6 +57,17 @@ export function useDirectoryData(
     enabled: boolean,
     initialTab: DirectoryTab = "files",
 ) {
+  // Every tab shows one workspace: that of the item the picker was opened
+  // from, or the active one. A chat or review takes documents from its own
+  // workspace only, so nothing from another is offered.
+  const workspace = useDocumentWorkspace();
+  const scoped = useCallback(
+    (tab: LibraryDirectoryTab): LibraryScope => ({
+      kind: libraryKind(tab),
+      workspace,
+    }),
+    [workspace],
+  );
   const [standaloneDocuments, setStandaloneDocuments] = useState<Document[]>(
     [],
   );
@@ -162,6 +175,7 @@ export function useDirectoryData(
         if (tab === "projects") {
           const rows = await listProjectSummaries({
             limit: DIRECTORY_PAGE_SIZE + 1,
+            workspace,
           });
           setProjects(
             rows.slice(0, DIRECTORY_PAGE_SIZE).map((project) => ({
@@ -172,7 +186,7 @@ export function useDirectoryData(
           );
           setProjectsHasMore(rows.length > DIRECTORY_PAGE_SIZE);
                 } else {
-          const result = await getLibrary(libraryKind(tab), {
+          const result = await getLibrary(scoped(tab), {
             limit: DIRECTORY_PAGE_SIZE,
           });
           setLibraryDocuments(tab, () => sortDocuments(result.documents));
@@ -207,7 +221,7 @@ export function useDirectoryData(
                 setLoadingTabs((prev) => ({ ...prev, [tab]: false }));
             }
         },
-    [enabled, setLibraryDocuments, setLibraryFolders],
+    [enabled, scoped, setLibraryDocuments, setLibraryFolders, workspace],
   );
 
   const loadFolderChildren = useCallback(
@@ -224,7 +238,7 @@ export function useDirectoryData(
       const request = (async () => {
         try {
           const result = await getLibraryFolderChildren(
-            libraryKind(tab),
+            scoped(tab),
             folderId,
             {
               limit: DIRECTORY_PAGE_SIZE,
@@ -271,7 +285,7 @@ export function useDirectoryData(
       folderRequestsRef.current.set(requestKey, request);
       return request;
     },
-    [enabled, setLibraryDocuments, setLibraryFolders],
+    [enabled, scoped, setLibraryDocuments, setLibraryFolders],
   );
 
   const loadMoreLibraryDocuments = useCallback(
@@ -297,11 +311,11 @@ export function useDirectoryData(
       const request = (async () => {
         try {
           const result = parentId
-            ? await getLibraryFolderChildren(libraryKind(tab), parentId, {
+            ? await getLibraryFolderChildren(scoped(tab), parentId, {
                 limit: DIRECTORY_PAGE_SIZE,
                 offset,
               })
-            : await getLibrary(libraryKind(tab), {
+            : await getLibrary(scoped(tab), {
                 limit: DIRECTORY_PAGE_SIZE,
                 offset,
               });
@@ -334,7 +348,7 @@ export function useDirectoryData(
       moreRequestsRef.current.set(requestKey, request);
       return request;
     },
-    [enabled, setLibraryDocuments, setLibraryFolders],
+    [enabled, scoped, setLibraryDocuments, setLibraryFolders],
   );
 
   const loadMoreProjects = useCallback(async () => {
@@ -347,6 +361,7 @@ export function useDirectoryData(
       const rows = await listProjectSummaries({
         limit: DIRECTORY_PAGE_SIZE + 1,
         offset: projectsRef.current.length,
+        workspace,
       });
       setProjects((current) =>
         mergeById(
@@ -365,7 +380,7 @@ export function useDirectoryData(
       loadingMoreProjectsRef.current = false;
       setLoadingMoreProjects(false);
     }
-  }, [enabled, projectsHasMore]);
+  }, [enabled, projectsHasMore, workspace]);
 
   const loadProjectLevel = useCallback(
     async (projectId: string, parentFolderId: string | null = null) => {

@@ -239,10 +239,30 @@ vi.mock("../../modules/user/user.apiKeyStore", async (importOriginal) => {
     getSavedApiKeySettings: (
         actual as unknown as Record<string, unknown>
     ).getSavedApiKeySettings,
-    updateUserApiKeySettings: (...args: unknown[]) =>
-        updateUserApiKeySettings(...args),
+    // The store serves a person's keys and an organization's through one
+    // owner-based implementation. These routes are the personal ones, so
+    // each owner-based call is handed to the spy the tests already assert
+    // on, with the owner unwrapped to the user id it carries.
+    userKeyOwner: actual.userKeyOwner,
+    orgKeyOwner: actual.orgKeyOwner,
+    updateApiKeySettings: (owner: { id: string }, ...args: unknown[]) =>
+        updateUserApiKeySettings(owner.id, ...args),
     getUserApiKeyStatus: (...args: unknown[]) => getUserApiKeyStatus(...args),
+    getApiKeyStatusFor: (owner: { id: string }, ...args: unknown[]) =>
+        getUserApiKeyStatus(owner.id, ...args),
     saveUserApiKey: (...args: unknown[]) => saveUserApiKey(...args),
+    saveApiKeyFor: (
+        owner: { id: string },
+        provider: string,
+        value: string | null,
+        db: unknown,
+        settings: Record<string, unknown> = {},
+    ) =>
+        // A provider with no companion setting was, and is asserted as, a
+        // four-argument save.
+        actual.isSettingsApiKeyProvider(provider as never)
+            ? saveUserApiKey(owner.id, provider, value, db, settings)
+            : saveUserApiKey(owner.id, provider, value, db),
     hasEnvApiKey: (...args: unknown[]) => hasEnvApiKey(...args),
     normalizeApiKeyProvider: (...args: unknown[]) =>
         normalizeApiKeyProvider(...args),
@@ -1631,13 +1651,9 @@ describe("user.routes", () => {
                 .set(...AUTH);
 
             expect(res.status).toBe(204);
-            // Durable job queued...
-            const jobInserts = (supabaseState.inserts.db_jobs ?? []) as Record<
-                string,
-                unknown
-            >[];
-            expect(jobInserts).toHaveLength(1);
-            expect(jobInserts[0]).toMatchObject({ kind: "account.delete" });
+            expect(supabaseRpc).toHaveBeenCalledWith("request_account_deletion", {
+                p_user_id: "u1", p_user_email: "u1@test.local",
+            });
             // ...auth user still present, so the cascade can still read the
             // storage paths it is about to delete.
             expect(adminDeleteUser).not.toHaveBeenCalled();
@@ -1649,7 +1665,7 @@ describe("user.routes", () => {
         // SOLE-ADMIN REFUSAL. Deleting this account would either hand the
         // organization to an arbitrary successor or strand it with no members
         // at all, so the product refuses and names the organizations.
-        it("DELETE /user/account returns 409 for the sole admin of a live org", async () => {
+        it("DELETE /user/account returns 409 for the sole owner of a live org", async () => {
             listOrgsBlockingAccountDeletion.mockResolvedValue([
                 { org_id: "o1", name: "Org A", reason: "members" },
                 { org_id: "o2", name: "Org B", reason: "content" },
@@ -1662,7 +1678,7 @@ describe("user.routes", () => {
             expect(res.status).toBe(409);
             expect(res.body.code).toBe("org_successor_required");
             expect(res.body.detail).toBe(
-                "You are the only admin of Org A. Make another member an admin, or delete the organization, before deleting your account. You are the only admin of Org B, which still owns content. Delete or move the organization's projects, workflows, documents and reviews, or delete the organization, before deleting your account.",
+                "You are the only owner of Org A. Make another member an owner, or delete the organization, before deleting your account. You are the only owner of Org B, and must appoint another owner or explicitly delete the organization before deleting your account.",
             );
             expect(res.body.organizations).toEqual([
                 { org_id: "o1", name: "Org A", reason: "members" },
@@ -1670,14 +1686,14 @@ describe("user.routes", () => {
             ]);
             // Nothing was scheduled, nothing was revoked, nothing was
             // destroyed — the user is still signed in and can appoint an
-            // admin. The old behaviour answered 204, revoked the session and
+            // owner. The old behaviour answered 204, revoked the session and
             // then failed the job forever.
             expect(supabaseState.inserts.db_jobs ?? []).toHaveLength(0);
             expect(adminSignOut).not.toHaveBeenCalled();
             expect(deleteUserAccountData).not.toHaveBeenCalled();
         });
 
-        it("DELETE /user/account refuses the inline path for a sole admin too", async () => {
+        it("DELETE /user/account refuses the inline path for a sole owner too", async () => {
             // The no-runner fallback runs the cascade synchronously, so the
             // check must gate it as well.
             dbJobsEnabled.mockReturnValue(false);
@@ -1728,10 +1744,10 @@ describe("user.routes", () => {
         it("DELETE /user/account returns 500 when the cascade cannot be scheduled", async () => {
             // Nothing has been destroyed yet, so the request is cleanly
             // retriable — it must not answer 204.
-            supabaseState.tables.db_jobs = {
+            supabaseRpc.mockResolvedValueOnce({
                 data: null,
                 error: { code: "08006", message: "connection lost" },
-            };
+            });
 
             const res = await request(app)
                 .delete("/user/account")

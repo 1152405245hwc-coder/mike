@@ -160,6 +160,20 @@ export async function requireAuth(
     return;
   }
 
+  const { data: deletionProfile, error: deletionError } = await admin
+    .from("user_profiles")
+    .select("account_deletion_requested_at")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (deletionError) {
+    sendInternalError(res, deletionError);
+    return;
+  }
+  if (deletionProfile?.account_deletion_requested_at) {
+    res.status(401).json({ code: "account_deletion_pending", detail: "This account is being deleted." });
+    return;
+  }
+
   res.locals.userId = user.id;
   // `userEmail` is an AUTHORIZATION input, not a display value: direct grants
   // (projects, chats, reviews, workflows) and organization invitations are
