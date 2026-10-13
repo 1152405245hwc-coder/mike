@@ -10,6 +10,8 @@ import Link from "next/link";
 import { SiteLogo } from "@/app/components/site-logo";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { cn } from "@/app/lib/utils";
+import { WarningPopup } from "@/app/components/popups/WarningPopup";
+import { noticeActionClassName } from "@/shared/ui/NoticeCardUI";
 import {
     authGlassCardUIClassName,
     authInputUIClassName,
@@ -81,16 +83,25 @@ function SignupContent() {
 
     useEffect(() => {
         if (isAccountCreatedPreview) return;
-        if (!authLoading && isAuthenticated && !success) {
+        if (!authLoading && isAuthenticated && !loading && !success) {
             router.replace("/onboarding/profile");
         }
     }, [
         authLoading,
         isAccountCreatedPreview,
         isAuthenticated,
+        loading,
         router,
         success,
     ]);
+
+    useEffect(() => {
+        if (!success) return;
+        const timer = setTimeout(() => {
+            router.push("/onboarding/profile");
+        }, 2000);
+        return () => clearTimeout(timer);
+    }, [router, success]);
 
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -128,9 +139,6 @@ function SignupContent() {
             if (!result.requiresEmailConfirmation) {
                 await refreshSession();
                 setSuccess(true);
-                setTimeout(() => {
-                    router.push("/onboarding/profile");
-                }, 2000);
             } else {
                 router.push("/signup/check-email");
             }
@@ -230,26 +238,6 @@ function SignupContent() {
                             />
                         </div>
 
-                        {error && (
-                            <div
-                                role="alert"
-                                className="text-red-600 text-sm bg-red-50 p-3 rounded"
-                            >
-                                {error.message}
-                                {error.supportable && (
-                                    <a
-                                        href={supportMailtoFor(
-                                            error,
-                                            "Failed to create an account.",
-                                        )}
-                                        className="ml-2 underline underline-offset-2"
-                                    >
-                                        Contact support
-                                    </a>
-                                )}
-                            </div>
-                        )}
-
                         <div className="space-y-3 pt-2">
                             <div className="text-center text-xs text-gray-500">
                                 By signing up, you agree to our{" "}
@@ -299,6 +287,25 @@ function SignupContent() {
                     </Link>
                 </div>
             </div>
+            <WarningPopup
+                open={!!error}
+                onClose={() => setError(null)}
+                title={error?.title}
+                message={error?.message}
+                actions={
+                    error?.supportable ? (
+                        <a
+                            href={supportMailtoFor(
+                                error,
+                                "Failed to create an account.",
+                            )}
+                            className={noticeActionClassName()}
+                        >
+                            Contact support
+                        </a>
+                    ) : undefined
+                }
+            />
         </div>
     );
 }

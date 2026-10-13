@@ -294,7 +294,12 @@ describe("project Owner contacts", () => {
     it("uses only effective organization Owners for an organization project", async () => {
         const db = makeDb({
             projects: [
-                { id: "p1", user_id: "creator", org_id: "o1" },
+                {
+                    id: "p1",
+                    user_id: "creator",
+                    org_id: "o1",
+                    visibility: "organization",
+                },
             ],
             project_access_grants: [
                 {
@@ -314,7 +319,7 @@ describe("project Owner contacts", () => {
             ],
             org_members: [
                 { org_id: "o1", user_id: "creator", role: "admin" },
-                { org_id: "o1", user_id: "boss", role: "admin" },
+                { org_id: "o1", user_id: "boss", role: "owner" },
                 { org_id: "o1", user_id: "staffer", role: "member" },
             ],
             user_profiles: [
@@ -331,7 +336,10 @@ describe("project Owner contacts", () => {
             id: "p1",
             user_id: "creator",
             org_id: "o1",
+            visibility: "organization",
         });
+        // The project is public, so the organization's owner is an Owner of
+        // it and somebody to ask.
         expect(contacts).toEqual([
             {
                 user_id: "creator",
@@ -356,13 +364,45 @@ describe("project Owner contacts", () => {
         );
     });
 
-    it("still names the org's admins when the creator's account is gone", async () => {
+    it("names only the creator for a private project, not the organization's owners", async () => {
+        // The organization's owner has no standing on a member's private
+        // matter, so they are not who you ask for access to it.
+        const db = makeDb({
+            projects: [
+                { id: "p1", user_id: "creator", org_id: "o1", visibility: "private" },
+            ],
+            project_access_grants: [],
+            org_members: [
+                { org_id: "o1", user_id: "creator", role: "member" },
+                { org_id: "o1", user_id: "boss", role: "owner" },
+            ],
+            user_profiles: [
+                {
+                    user_id: "creator",
+                    email: "creator@firm.example",
+                    display_name: "Cee",
+                },
+                { user_id: "boss", email: "boss@firm.example", display_name: "Bee" },
+            ],
+        });
+        const contacts = await listProjectAdminContacts(db, {
+            id: "p1",
+            user_id: "creator",
+            org_id: "o1",
+            visibility: "private",
+        });
+        expect(contacts.map((contact) => contact.email)).toEqual([
+            "creator@firm.example",
+        ]);
+    });
+
+    it("still names the org's owners when the creator's account is gone", async () => {
         // This is the case an org project is designed to survive: user_id is
         // NULL, and the firm's admins are who you ask.
         const db = makeDb({
             projects: [{ id: "p1", user_id: null, org_id: "o1" }],
             project_access_grants: [],
-            org_members: [{ org_id: "o1", user_id: "boss", role: "admin" }],
+            org_members: [{ org_id: "o1", user_id: "boss", role: "owner" }],
             user_profiles: [
                 { user_id: "boss", email: "boss@firm.example", display_name: "Bee" },
             ],

@@ -44,6 +44,8 @@ import {
     useSelectedReasoning,
 } from "@/app/hooks/useSelectedModel";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { useModelApiKeys } from "@/app/hooks/useModelApiKeys";
+import { useModelRouterSelections } from "@/app/hooks/useModelRouterSelections";
 import {
     getModelProvider,
     isModelAvailable,
@@ -64,6 +66,7 @@ import {
     uploadStandaloneDocuments,
     type UploadProgress,
 } from "@/app/lib/mikeApi";
+import { useDocumentWorkspace } from "@/app/contexts/WorkspaceContext";
 import {
     SUPPORTED_DOCUMENT_ACCEPT,
     formatUnsupportedDocumentWarning,
@@ -76,7 +79,6 @@ import {
 } from "@/shared/lib/messageExcerpts";
 import { useConfiguredModels } from "@/app/hooks/useConfiguredModels";
 import {
-    routerSelections,
     type NoModelsReason,
 } from "@/shared/lib/modelCatalog";
 
@@ -183,6 +185,9 @@ function ChatInputForChatImpl(
     }: Props,
     ref: ForwardedRef<ChatInputHandle>,
 ) {
+    // A document attached to a chat outside a project belongs to the
+    // workspace it is uploaded in.
+    const workspace = useDocumentWorkspace();
     // Sending needs both a grant and a loaded thread; the placeholder below
     // names whichever one is missing.
     const composerOpen = canSend === true && !chatLoading;
@@ -203,6 +208,11 @@ function ChatInputForChatImpl(
         persistChatModelSelection,
         persistChatReasoningSelection,
     } = useUserProfile();
+    // Unknown key state → availability is UNKNOWN; undefined makes every key
+    // gate (submit check + model toggle) fail open instead of treating "we
+    // couldn't ask" as "no keys configured". In an organization workspace
+    // these are the organization's keys, not the profile's.
+    const apiKeys = useModelApiKeys();
     const configuredModels = useConfiguredModels();
     const configuredModelIds = useMemo(
         () => configuredModels.map((model) => model.id),
@@ -213,10 +223,8 @@ function ChatInputForChatImpl(
     // /user/profile request rewrite the saved composer selection to the
     // default — permanently. null means "not loaded", which the hook leaves
     // the stored selection alone for.
-    const savedRouterSelections = useMemo(
-        () => (profile ? routerSelections(profile) : undefined),
-        [profile],
-    );
+    // In an organization workspace these are the lists that govern its keys.
+    const savedRouterSelections = useModelRouterSelections();
     const [model, setModel] = useSelectedModel({
         selectionKey: chatKey,
         chatModel,
@@ -225,13 +233,9 @@ function ChatInputForChatImpl(
             savedRouterSelections && !apiKeysDegraded
                 ? savedRouterSelections
                 : null,
-        apiKeys: apiKeysDegraded ? undefined : profile?.apiKeys,
+        apiKeys,
         configuredModelIds,
     });
-    // Degraded profile → key availability is UNKNOWN; undefined here makes
-    // every key gate (submit check + model toggle) fail open instead of
-    // treating "we couldn't ask" as "no keys configured".
-    const apiKeys = apiKeysDegraded ? undefined : profile?.apiKeys;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const controlsRef = useRef<HTMLDivElement>(null);
     const [compactControls, setCompactControls] = useState(false);
@@ -436,9 +440,11 @@ function ChatInputForChatImpl(
                     ? await uploadProjectDocuments(projectId, uploadInputs, {
                           onProgress: handleProgress,
                       })
-                    : await uploadStandaloneDocuments(uploadInputs, {
-                          onProgress: handleProgress,
-                      });
+                    : await uploadStandaloneDocuments(
+                          uploadInputs,
+                          { onProgress: handleProgress },
+                          workspace,
+                      );
                 if (!uploadGenerationActiveRef.current) return;
                 const uploaded = outcomes.flatMap((outcome) =>
                     outcome.status === "completed" && outcome.result
@@ -467,6 +473,7 @@ function ChatInputForChatImpl(
             }
         },
         [
+            workspace,
             addAttachedDocuments,
             canSend,
             composerOpen,

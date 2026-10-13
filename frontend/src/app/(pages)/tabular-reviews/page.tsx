@@ -26,7 +26,9 @@ import { userFacingApiError } from "@/app/lib/userFacingError";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { useAuth } from "@/app/contexts/AuthContext";
+import { useWorkspaceOrgId } from "@/app/contexts/WorkspaceContext";
 import { PageHeader } from "@/app/components/shared/PageHeader";
+import { PAGE_HEADER_TITLE_CLASS } from "@/app/components/shared/pageHeaderStyles";
 import type { TableSortDirection } from "@/app/components/shared/TablePrimitive";
 import {
     type TabularReviewScope,
@@ -118,6 +120,7 @@ export default function TabularReviewsPage() {
         () => new Set(),
     );
     const { user } = useAuth();
+    const workspaceOrgId = useWorkspaceOrgId();
     const previewEmptyStates = searchParams.get("emptyStates") === "1";
     const effectiveLoading = loading && !previewEmptyStates;
     const visibleReviews = useMemo(
@@ -202,7 +205,11 @@ export default function TabularReviewsPage() {
                     columns_config: columnsConfig ?? [],
                     document_grouping: documentGrouping,
                     model,
-                    ...(projectId && { project_id: projectId }),
+                    // In a project the project decides where the review
+                    // belongs; on its own, the workspace it is started in.
+                    ...(projectId
+                        ? { project_id: projectId }
+                        : workspaceOrgId && { org_id: workspaceOrgId }),
                 }));
             createdReviewRef.current = review;
 
@@ -400,7 +407,7 @@ export default function TabularReviewsPage() {
                     },
                 ]}
             >
-                <h1 className="text-2xl font-medium font-serif text-gray-900">
+                <h1 className={`${PAGE_HEADER_TITLE_CLASS} text-gray-900`}>
                     Tabular Reviews
                 </h1>
             </PageHeader>

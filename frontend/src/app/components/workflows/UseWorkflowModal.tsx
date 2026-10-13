@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useDirectoryData } from "../shared/useDirectoryData";
 import { FileDirectory } from "../shared/FileDirectory";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
+import { useWorkspaceOrgId } from "@/app/contexts/WorkspaceContext";
 import { Modal } from "../modals/Modal";
 import { FieldLabel } from "../ui/form-field";
 import { ModalSegmentedToggle } from "../modals/ModalSegmentedToggle";
@@ -17,11 +18,12 @@ import { workflowDetailPath } from "./workflowRoutes";
 import { ModelToggle } from "../assistant/ModelToggle";
 import {
     isRouterModelSelected,
-    routerSelections,
     type NoModelsReason,
 } from "@/shared/lib/modelCatalog";
 import { NoModelsWarningPopup } from "../popups/NoModelsWarningPopup";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { useModelApiKeys } from "@/app/hooks/useModelApiKeys";
+import { useModelRouterSelections } from "@/app/hooks/useModelRouterSelections";
 import { isModelAvailable } from "@/app/lib/modelAvailability";
 import { useConfiguredModels } from "@/app/hooks/useConfiguredModels";
 import { roleFrom } from "@/app/lib/permissions";
@@ -95,9 +97,9 @@ export function UseWorkflowModal({ workflow, onClose, skipSelect = false }: Prop
     const [selectedModel, setSelectedModel] = useState("");
     const [noModelsWarning, setNoModelsWarning] =
         useState<NoModelsReason | null>(null);
-    const { profile, loading: profileLoading, apiKeysDegraded } =
-        useUserProfile();
-    const apiKeys = apiKeysDegraded ? undefined : profile?.apiKeys;
+    const { profile, loading: profileLoading } = useUserProfile();
+    const apiKeys = useModelApiKeys();
+    const modelRouterSelections = useModelRouterSelections();
     const configuredModels = useConfiguredModels();
     const configuredModelIds = useMemo(
         () => configuredModels.map((model) => model.id),
@@ -106,6 +108,7 @@ export function UseWorkflowModal({ workflow, onClose, skipSelect = false }: Prop
 
     const router = useRouter();
     const { saveChat, setNewChatMessages } = useChatHistoryContext();
+    const workspaceOrgId = useWorkspaceOrgId();
     const {
         loading: dirLoading,
         projects,
@@ -144,10 +147,10 @@ export function UseWorkflowModal({ workflow, onClose, skipSelect = false }: Prop
             return;
         }
         const defaultModel = profile.tabularModel;
-        const routerSelectionValid = isRouterModelSelected(
-            defaultModel,
-            routerSelections(profile),
-        );
+        // Unknown lists (an organization's, still loading) preselect nothing.
+        const routerSelectionValid =
+            !!modelRouterSelections &&
+            isRouterModelSelected(defaultModel, modelRouterSelections);
         if (
             routerSelectionValid &&
             (!apiKeys ||
@@ -155,7 +158,15 @@ export function UseWorkflowModal({ workflow, onClose, skipSelect = false }: Prop
         ) {
             setSelectedModel((current) => current || defaultModel);
         }
-    }, [apiKeys, configuredModelIds, profile, screen, selected, workflow]);
+    }, [
+        apiKeys,
+        configuredModelIds,
+        modelRouterSelections,
+        profile,
+        screen,
+        selected,
+        workflow,
+    ]);
 
     // Reset configure state on back
     useEffect(() => {
@@ -244,6 +255,9 @@ export function UseWorkflowModal({ workflow, onClose, skipSelect = false }: Prop
                 columns_config: wf.columns_config || [],
                 workflow_id: wf.is_system ? undefined : wf.id,
                 project_id: projectId,
+                // On its own, the review belongs to the workspace it is
+                // started in; in a project, the project decides.
+                org_id: projectId ? undefined : workspaceOrgId,
                 model: selectedModel,
             });
             handleClose();
@@ -449,11 +463,7 @@ export function UseWorkflowModal({ workflow, onClose, skipSelect = false }: Prop
                                     onChange={setSelectedModel}
                                     apiKeys={apiKeys}
                                     apiKeysLoading={profileLoading && !profile}
-                                    routerSelections={
-                                        profile
-                                            ? routerSelections(profile)
-                                            : undefined
-                                    }
+                                    routerSelections={modelRouterSelections}
                                     onNoModelsClick={setNoModelsWarning}
                                 />
                             </div>

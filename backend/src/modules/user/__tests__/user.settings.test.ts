@@ -1,20 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getUserApiKeys, getAllUserRouterModels } = vi.hoisted(() => ({
-    getUserApiKeys: vi.fn(),
-    getAllUserRouterModels: vi.fn(),
+const { getEffectiveApiKeys, getEffectiveRouterModels } = vi.hoisted(() => ({
+    getEffectiveApiKeys: vi.fn(),
+    getEffectiveRouterModels: vi.fn(),
 }));
 
 vi.mock("../user.apiKeyStore", () => ({
-    getUserApiKeys: (...args: unknown[]) => getUserApiKeys(...args),
+    getEffectiveApiKeys: (...args: unknown[]) => getEffectiveApiKeys(...args),
 }));
 
 vi.mock("../../../lib/routerModels", async () => ({
     ...(await vi.importActual<typeof import("../../../lib/routerModels")>(
         "../../../lib/routerModels",
     )),
-    getAllUserRouterModels: (...args: unknown[]) =>
-        getAllUserRouterModels(...args),
+    getEffectiveRouterModels: (...args: unknown[]) =>
+        getEffectiveRouterModels(...args),
 }));
 
 vi.mock("../../../lib/supabase", () => ({ createServerSupabase: vi.fn() }));
@@ -42,8 +42,8 @@ const NO_KEYS = {
 
 beforeEach(() => {
     vi.clearAllMocks();
-    getUserApiKeys.mockResolvedValue(NO_KEYS);
-    getAllUserRouterModels.mockResolvedValue({
+    getEffectiveApiKeys.mockResolvedValue(NO_KEYS);
+    getEffectiveRouterModels.mockResolvedValue({
         openrouter: ["allowed/model"],
         vercel: [],
         "opencode-go": [],
@@ -151,6 +151,57 @@ function retryingProfileDb(
     chain.single = vi.fn(async () => results.shift() ?? second);
     return chain as never;
 }
+
+describe("getUserModelSettings keys", () => {
+    it("loads the caller's own keys for personal work", async () => {
+        const db = profileDb({});
+        await getUserModelSettings("user-1", db);
+        expect(getEffectiveApiKeys).toHaveBeenCalledExactlyOnceWith(
+            "user-1",
+            undefined,
+            db,
+        );
+    });
+
+    it("loads the keys of the organization the work belongs to", async () => {
+        const db = profileDb({});
+        const settings = await getUserModelSettings("user-1", db, {
+            orgId: "org-1",
+        });
+        expect(getEffectiveApiKeys).toHaveBeenCalledExactlyOnceWith(
+            "user-1",
+            "org-1",
+            db,
+        );
+        expect(settings.api_keys).toBe(NO_KEYS);
+    });
+
+    it("judges saved preferences against the lists that govern those keys", async () => {
+        // "org/only" is in the organization's OpenRouter list, not the
+        // caller's own: inside the organization it is a usable preference.
+        getEffectiveRouterModels.mockImplementation(
+            async (_userId: string, orgId: string | null | undefined) => ({
+                openrouter: orgId ? ["org/only"] : ["allowed/model"],
+                vercel: [],
+                "opencode-go": [],
+            }),
+        );
+        const row = { last_selected_chat_model: "openrouter/org/only" };
+
+        const inOrg = await getUserModelSettings("user-1", profileDb(row), {
+            orgId: "org-1",
+        });
+        const personal = await getUserModelSettings("user-1", profileDb(row));
+
+        expect(inOrg.last_selected_chat_model).toBe("openrouter/org/only");
+        expect(personal.last_selected_chat_model).toBeNull();
+        expect(getEffectiveRouterModels).toHaveBeenCalledWith(
+            "user-1",
+            "org-1",
+            expect.anything(),
+        );
+    });
+});
 
 describe("getUserModelSettings on an un-migrated database", () => {
     it("retries without the memory curator column during rollout", async () => {

@@ -75,6 +75,8 @@ export async function generateDocx(
     landscape?: boolean;
     numberSections?: boolean;
     projectId?: string | null;
+    /** The conversation's organization: where a standalone document is filed. */
+    orgId?: string | null;
   },
 ) {
   try {
@@ -521,6 +523,7 @@ export async function generateDocx(
       userId,
       db,
       projectId: options?.projectId ?? null,
+      orgId: options?.orgId ?? null,
     });
   } catch (e) {
     return { error: String(e) };
@@ -919,8 +922,14 @@ async function persistGeneratedFile(params: {
   userId: string;
   db: Db;
   projectId?: string | null;
+  /**
+   * The organization of the conversation it was generated in. A document
+   * made in an organization's workspace belongs to that organization; inside
+   * a project the project's organization is stamped by the database.
+   */
+  orgId?: string | null;
 }) {
-  const { title, extension, buffer, userId, db, projectId } = params;
+  const { title, extension, buffer, userId, db, projectId, orgId } = params;
   const docId = crypto.randomUUID().replace(/-/g, "");
   const filename = safeGeneratedFilename(title, extension);
   const key = generatedDocKey(userId, docId, filename);
@@ -966,6 +975,7 @@ async function persistGeneratedFile(params: {
     .from("documents")
     .insert({
       project_id: projectId ?? null,
+      org_id: orgId ?? null,
       user_id: userId,
       status: "ready",
     })
@@ -1036,7 +1046,7 @@ export async function generateExcel(
   sheets: unknown[],
   userId: string,
   db: Db,
-  options?: { projectId?: string | null },
+  options?: { projectId?: string | null; orgId?: string | null },
 ) {
   try {
     const normalizedTitle = typeof title === "string" ? title : "Workbook";
@@ -1051,6 +1061,7 @@ export async function generateExcel(
       userId,
       db,
       projectId: options?.projectId ?? null,
+      orgId: options?.orgId ?? null,
     });
   } catch (e) {
     return { error: String(e) };
@@ -1062,7 +1073,7 @@ export async function generatePpt(
   slides: unknown[],
   userId: string,
   db: Db,
-  options?: { projectId?: string | null },
+  options?: { projectId?: string | null; orgId?: string | null },
 ) {
   try {
     const normalizedTitle = typeof title === "string" ? title : "Presentation";
@@ -1077,6 +1088,7 @@ export async function generatePpt(
       userId,
       db,
       projectId: options?.projectId ?? null,
+      orgId: options?.orgId ?? null,
     });
   } catch (e) {
     return { error: String(e) };

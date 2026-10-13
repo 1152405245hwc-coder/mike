@@ -70,6 +70,8 @@ import {
     type OwnerGate,
 } from "@/app/components/projects/ProjectWorkspace";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { useModelApiKeys } from "@/app/hooks/useModelApiKeys";
+import { useModelRouterSelections } from "@/app/hooks/useModelRouterSelections";
 import {
     getModelProvider,
     isModelAvailable,
@@ -84,16 +86,20 @@ import { TabularReviewDetailsModal } from "./TabularReviewDetailsModal";
 import { exportTabularReviewToExcel } from "./exportToExcel";
 import { readSseFrames } from "@/app/lib/sse";
 import { useSidebar } from "@/app/contexts/SidebarContext";
+import {
+    DocumentWorkspaceScope,
+    PERSONAL_WORKSPACE,
+} from "@/app/contexts/WorkspaceContext";
 import { PageHeader } from "../shared/PageHeader";
 import { TableToolbar } from "../shared/TableToolbar";
 import { TabPillButtonUI } from "@/shared/ui/TabPillButtonUI";
 import { ModelToggle } from "../assistant/ModelToggle";
 import {
-    routerSelections,
     type NoModelsReason,
 } from "@/shared/lib/modelCatalog";
 import { SUPPORTED_DOCUMENT_ACCEPT } from "@/app/lib/documentUploadValidation";
 import { useConfiguredModels } from "@/app/hooks/useConfiguredModels";
+import { useItemWorkspace } from "@/app/hooks/useItemWorkspace";
 
 interface Props {
     reviewId: string;
@@ -108,6 +114,12 @@ export function TRView({ reviewId, projectId }: Props) {
     );
     const { setSidebarOpen } = useSidebar();
     const [review, setReview] = useState<TabularReview | null>(null);
+    // Opening a review opens its workspace. One in a project follows its
+    // project, which says so itself.
+    useItemWorkspace(
+        projectId ? null : review?.id,
+        review ? (review.org_id ?? null) : undefined,
+    );
     const [project, setProject] = useState<Project | null>(null);
     const [cells, setCells] = useState<TabularCell[]>([]);
     const [documents, setDocuments] = useState<Document[]>([]);
@@ -128,6 +140,12 @@ export function TRView({ reviewId, projectId }: Props) {
     const [availableProjects, setAvailableProjects] = useState<Project[]>([]);
     const [accessModalOpen, setAccessModalOpen] = useState(false);
     const [grants, setGrants] = useState<ContentAccessGrant[] | null>(null);
+    // The organization whose members a standalone review can be shared with,
+    // as the server says: null for a personal review, which can go to any
+    // Mike user. Undefined until the access summary has loaded.
+    const [accessOrgId, setAccessOrgId] = useState<string | null | undefined>(
+        undefined,
+    );
     const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
     const [applyingWorkflow, setApplyingWorkflow] = useState(false);
     const [deleteReviewConfirmOpen, setDeleteReviewConfirmOpen] =
@@ -205,14 +223,11 @@ export function TRView({ reviewId, projectId }: Props) {
         [],
     );
     const router = useRouter();
-    const {
-        profile,
-        loading: profileLoading,
-        apiKeysDegraded,
-    } = useUserProfile();
+    const { profile, loading: profileLoading } = useUserProfile();
     // Unknown key state fails open; the submit gates below already skip when
     // apiKeys is undefined.
-    const apiKeys = apiKeysDegraded ? undefined : profile?.apiKeys;
+    const apiKeys = useModelApiKeys();
+    const modelRouterSelections = useModelRouterSelections();
     const tabularModel = review?.model ?? "";
     const cellMutationsBlocked =
         generating || stoppingGeneration || review?.is_running === true;
@@ -328,6 +343,7 @@ export function TRView({ reviewId, projectId }: Props) {
         try {
             const access = await getTabularReviewAccess(reviewId);
             setGrants(access.grants);
+            setAccessOrgId(access.org_id ?? null);
         } catch (error) {
             console.error("[tabular review] failed to load access", error);
             setGrants([]);
@@ -336,6 +352,7 @@ export function TRView({ reviewId, projectId }: Props) {
 
     useEffect(() => {
         setGrants(null);
+        setAccessOrgId(undefined);
     }, [reviewId]);
 
     useEffect(() => {
@@ -453,6 +470,9 @@ export function TRView({ reviewId, projectId }: Props) {
             for (const file of files) {
                 const document = await uploadReviewDocument(reviewId, file, {
                     projectId,
+                    workspace: review
+                        ? (review.org_id ?? PERSONAL_WORKSPACE)
+                        : undefined,
                     documentIds,
                     columnsConfig: columns,
                 });
@@ -1513,9 +1533,7 @@ export function TRView({ reviewId, projectId }: Props) {
                                                 profileLoading && !profile
                                             }
                                             routerSelections={
-                                                profile
-                                                    ? routerSelections(profile)
-                                                    : undefined
+                                                modelRouterSelections
                                             }
                                             onNoModelsClick={setNoModelsWarning}
                                         />
@@ -1801,42 +1819,48 @@ export function TRView({ reviewId, projectId }: Props) {
                 onAdd={handleAddColumn}
             />
 
-            {project ? (
-                <AddDocumentsModal
-                    open={addDocsOpen}
-                    onClose={() => setAddDocsOpen(false)}
-                    onSelect={(docs: Document[]) => handleAddDocuments(docs)}
-                    breadcrumb={[
-                        "Projects",
-                        project.name +
-                            (project.cm_number
-                                ? ` (#${project.cm_number})`
-                                : ""),
-                        "Tabular Reviews",
-                        ...(review ? [review.title || "Untitled Review"] : []),
-                        "Add Documents",
-                    ]}
-                    uploadStateId={`tabular-review:${review?.id ?? "new"}:project`}
-                    projectId={project.id}
-                    projectDocumentsOnly
-                    disabledDocumentIds={
-                        new Set(documents.map((document) => document.id))
-                    }
-                />
-            ) : (
-                <AddDocumentsModal
-                    open={addDocsOpen}
-                    onClose={() => setAddDocsOpen(false)}
-                    onSelect={(docs: Document[]) => handleAddDocuments(docs)}
-                    breadcrumb={[
-                        "Tabular Reviews",
-                        ...(review ? [review.title || "Untitled Review"] : []),
-                        "Add Documents",
-                    ]}
-                    uploadStateId={`tabular-review:${review?.id ?? "new"}:library`}
-                    tabs={["files", "projects"]}
-                />
-            )}
+            {/* The review's own workspace, which the dialogs list and
+                upload into: it takes documents from nowhere else. */}
+            <DocumentWorkspaceScope
+                orgId={review ? (review.org_id ?? null) : undefined}
+            >
+                {project ? (
+                    <AddDocumentsModal
+                        open={addDocsOpen}
+                        onClose={() => setAddDocsOpen(false)}
+                        onSelect={(docs: Document[]) => handleAddDocuments(docs)}
+                        breadcrumb={[
+                            "Projects",
+                            project.name +
+                                (project.cm_number
+                                    ? ` (#${project.cm_number})`
+                                    : ""),
+                            "Tabular Reviews",
+                            ...(review ? [review.title || "Untitled Review"] : []),
+                            "Add Documents",
+                        ]}
+                        uploadStateId={`tabular-review:${review?.id ?? "new"}:project`}
+                        projectId={project.id}
+                        projectDocumentsOnly
+                        disabledDocumentIds={
+                            new Set(documents.map((document) => document.id))
+                        }
+                    />
+                ) : (
+                    <AddDocumentsModal
+                        open={addDocsOpen}
+                        onClose={() => setAddDocsOpen(false)}
+                        onSelect={(docs: Document[]) => handleAddDocuments(docs)}
+                        breadcrumb={[
+                            "Tabular Reviews",
+                            ...(review ? [review.title || "Untitled Review"] : []),
+                            "Add Documents",
+                        ]}
+                        uploadStateId={`tabular-review:${review?.id ?? "new"}:library`}
+                        tabs={["files", "projects"]}
+                    />
+                )}
+            </DocumentWorkspaceScope>
 
             <TabularReviewDetailsModal
                 open={detailsOpen}
@@ -1864,8 +1888,15 @@ export function TRView({ reviewId, projectId }: Props) {
                 ]}
                 access={{
                     grants: grants ?? [],
-                    orgId: null,
+                    // A review that belongs to an organization is shared
+                    // with that organization's members only, so the dialog
+                    // offers them to pick from rather than any address.
+                    orgId:
+                        accessOrgId === undefined
+                            ? (review?.org_id ?? null)
+                            : accessOrgId,
                     ownerLabel: "Review owners",
+                    resourceNoun: "review",
                     inheritedFromProjectId: review?.project_id ?? null,
                     canManage: can(reviewRole, "access.manage"),
                     // The mutation is what AccessModal reports on. Reloading

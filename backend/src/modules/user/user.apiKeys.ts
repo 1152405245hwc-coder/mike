@@ -11,15 +11,18 @@ import {
 } from "../../lib/llm/cloudProviders";
 import type { ProviderSettings } from "../../lib/llm";
 import {
+    type ApiKeyOwner,
     type ApiKeyProvider,
     type ApiKeyStatus,
     type SettingsApiKeyProvider,
+    getApiKeyStatusFor,
     getSavedApiKeySettings,
     getUserApiKeyStatus,
     isSettingsApiKeyProvider,
     normalizeProviderSettings,
-    saveUserApiKey,
-    updateUserApiKeySettings,
+    saveApiKeyFor,
+    updateApiKeySettings,
+    userKeyOwner,
 } from "./user.apiKeyStore";
 import { type Db, errorMessage } from "./user.shared";
 
@@ -57,13 +60,13 @@ export const REENTER_KEY_FOR_ENDPOINT =
  */
 async function endpointChangeNeedsKey(
     db: Db,
-    userId: string,
+    owner: ApiKeyOwner,
     provider: SettingsApiKeyProvider,
     next: ProviderSettings,
 ): Promise<boolean> {
     if (!isEndpointScopedProvider(provider)) return false;
-    const saved = await getSavedApiKeySettings(userId, provider, db);
-    // No saved key: updateUserApiKeySettings reports that on its own.
+    const saved = await getSavedApiKeySettings(owner, provider, db);
+    // No saved key: updateApiKeySettings reports that on its own.
     if (!saved) return false;
     const current = normalizeProviderSettings(provider, saved.settings);
     if (!current) return true;
@@ -82,7 +85,7 @@ async function endpointChangeNeedsKey(
  *   Azure OpenAI, Azure AI Foundry) requires the key to be re-entered;
  * - neither removes the key and its settings.
  */
-export async function saveApiKey(
+export function saveApiKey(
     db: Db,
     params: {
         userId: string;
@@ -91,7 +94,33 @@ export async function saveApiKey(
         settings?: unknown;
     },
 ): Promise<SaveApiKeyResult> {
-    const { userId, provider, apiKey } = params;
+    return saveApiKeyForOwner(db, {
+        owner: userKeyOwner(params.userId),
+        provider: params.provider,
+        apiKey: params.apiKey,
+        settings: params.settings,
+    });
+}
+
+/**
+ * The same save, for a person's key or an organization's. One
+ * implementation, so an organization's key gets every check a personal one
+ * does (a Vertex key's shape, a setting that validates, the re-entry an
+ * endpoint move requires) rather than a second copy of them to keep in step.
+ * The caller authorises the write; `savedBy` is recorded on an
+ * organization's key.
+ */
+export async function saveApiKeyForOwner(
+    db: Db,
+    params: {
+        owner: ApiKeyOwner;
+        provider: ApiKeyProvider;
+        apiKey: string | null;
+        settings?: unknown;
+        savedBy?: string;
+    },
+): Promise<SaveApiKeyResult> {
+    const { owner, provider, apiKey, savedBy } = params;
     const key = apiKey?.trim() || null;
     // A Vertex "key" is a structured file; reject anything else up front
     // instead of storing a value that fails on first use.
@@ -115,7 +144,7 @@ export async function saveApiKey(
             if (
                 !key &&
                 settings &&
-                (await endpointChangeNeedsKey(db, userId, provider, settings))
+                (await endpointChangeNeedsKey(db, owner, provider, settings))
             ) {
                 return {
                     ok: false,
@@ -124,8 +153,8 @@ export async function saveApiKey(
                 };
             }
             if (!key && settings) {
-                const updated = await updateUserApiKeySettings(
-                    userId,
+                const updated = await updateApiKeySettings(
+                    owner,
                     provider,
                     settings,
                     db,
@@ -138,17 +167,25 @@ export async function saveApiKey(
                     };
                 }
             } else {
-                await saveUserApiKey(userId, provider, key, db, settings ?? {});
+                await saveApiKeyFor(
+                    owner,
+                    provider,
+                    key,
+                    db,
+                    settings ?? {},
+                    savedBy,
+                );
             }
         } else {
-            await saveUserApiKey(userId, provider, key, db);
+            await saveApiKeyFor(owner, provider, key, db, {}, savedBy);
         }
-        const status = await getUserApiKeyStatus(userId, db);
+        const status = await getApiKeyStatusFor(owner, db);
         return { ok: true, status };
     } catch (err) {
         const detail = errorMessage(err);
         console.error("[user/api-keys] save failed", {
             provider,
+            owner: owner.kind,
             error: detail,
         });
         return { ok: false, kind: "save_failed", error: err };

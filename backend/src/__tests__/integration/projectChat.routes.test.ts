@@ -178,6 +178,16 @@ vi.mock("../../modules/user/user.settings", () => ({
     persistLastSelectedChatModel: vi.fn(async () => null),
 }));
 
+// The one-result fake above cannot answer the reads this makes; the rule has
+// its own tests in lib/__tests__/documentWorkspace.test.ts.
+const { findNewAttachmentsOutsideWorkspace } = vi.hoisted(() => ({
+    findNewAttachmentsOutsideWorkspace: vi.fn(async (): Promise<string[]> => []),
+}));
+vi.mock("../../lib/documentWorkspace", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../lib/documentWorkspace")>()),
+    findNewAttachmentsOutsideWorkspace,
+}));
+
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
     ensureDocAccess: vi.fn(async () => ({ ok: true, isCreator: true })),
@@ -367,6 +377,44 @@ describe("POST /projects/:projectId/chat", () => {
     });
     expect(scheduleMemoryConsolidation).toHaveBeenCalledTimes(1);
     expect(releaseMemoryConversationTurn).not.toHaveBeenCalled();
+    });
+
+    it("runs a personal project's chat on the caller's own keys", async () => {
+        const userSettings = await import("../../modules/user/user.settings.js");
+
+        await request(app)
+            .post("/projects/p1/chat")
+            .set("Authorization", "Bearer test")
+            .send(VALID_BODY);
+
+        expect(userSettings.getUserModelSettings).toHaveBeenCalledWith(
+            "u1",
+            expect.anything(),
+            { orgId: null },
+        );
+    });
+
+    it("runs an organization project's chat on the organization's keys", async () => {
+        const userSettings = await import("../../modules/user/user.settings.js");
+        checkProjectAccess.mockResolvedValue({
+            ok: true,
+            isCreator: true,
+            orgRole: "member",
+            projectRole: "owner",
+            project: { id: "p1", user_id: "u1", org_id: "org-1" },
+        });
+
+        const res = await request(app)
+            .post("/projects/p1/chat")
+            .set("Authorization", "Bearer test")
+            .send(VALID_BODY);
+
+        expect(res.status).toBe(200);
+        expect(userSettings.getUserModelSettings).toHaveBeenCalledWith(
+            "u1",
+            expect.anything(),
+            { orgId: "org-1" },
+        );
     });
 
     it("uses the shared last-selected model when a new project chat omits model", async () => {

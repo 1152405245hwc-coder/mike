@@ -382,8 +382,7 @@ export default function SettingsPage() {
             <div className="min-w-0 space-y-1">
               <SettingsLabel>Delete account</SettingsLabel>
               <SettingsDescription>
-                Permanently delete your account and all associated data. This
-                action cannot be undone.
+                Permanently delete your account and personal workspace. Organization work follows the member removal policy.
               </SettingsDescription>
             </div>
             <PillButtonUI
@@ -403,7 +402,7 @@ export default function SettingsPage() {
       <ConfirmPopup
         open={deleteConfirm}
         title="Delete account?"
-        message="This will permanently delete your account and all associated data. This action cannot be undone."
+        message="This permanently deletes your account and personal workspace. In each organization, shared work without another owner transfers to a remaining organization owner. Unshared private work is retained for 30 days for organization owners to recover or delete. You must appoint another owner or delete any organization you solely own first."
         confirmLabel="Delete"
         confirmVariant="danger"
         confirmStatus={isDeleting ? "loading" : "idle"}

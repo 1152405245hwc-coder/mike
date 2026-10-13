@@ -299,6 +299,12 @@ export async function runToolCalls(
      * edit_document runs (direct grants are keyed by email).
      */
     userEmail?: string | null;
+    /**
+     * The organization the conversation belongs to, if any. A document the
+     * assistant creates outside a project is filed under it, so that work
+     * done in an organization's workspace stays in that organization.
+     */
+    orgId?: string | null;
   } = {},
 ): Promise<{
   toolResults: unknown[];
@@ -1754,6 +1760,9 @@ export async function runToolCalls(
             const docRows = newDocs.map((d) => ({
               id: d.id,
               project_id: projectId ?? null,
+              // Outside a project: the conversation's organization. Inside
+              // one the database stamps the project's.
+              org_id: options.orgId ?? null,
               user_id: userId,
               status: "ready",
               library_kind: "file",
@@ -1963,7 +1972,12 @@ export async function runToolCalls(
         args.sections as unknown[],
         userId,
         db,
-        { landscape, numberSections, projectId: projectId ?? null },
+        {
+          landscape,
+          numberSections,
+          projectId: projectId ?? null,
+          orgId: options.orgId ?? null,
+        },
       );
       registerGeneratedDocument(
         tc,
@@ -1983,7 +1997,7 @@ export async function runToolCalls(
         args.sheets as unknown[],
         userId,
         db,
-        { projectId: projectId ?? null },
+        { projectId: projectId ?? null, orgId: options.orgId ?? null },
       );
       registerGeneratedDocument(
         tc,
@@ -2003,7 +2017,7 @@ export async function runToolCalls(
         args.slides as unknown[],
         userId,
         db,
-        { projectId: projectId ?? null },
+        { projectId: projectId ?? null, orgId: options.orgId ?? null },
       );
       registerGeneratedDocument(
         tc,

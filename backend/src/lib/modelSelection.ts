@@ -136,6 +136,8 @@ export async function resolveEffectiveChatModel(args: {
     apiKeys: UserApiKeys;
     userId: string;
     db: Db;
+    /** The organization the work belongs to: its lists govern its keys. */
+    orgId?: string | null;
 }): Promise<EffectiveChatModelResult> {
     const requestedText = args.requested?.trim() ?? "";
     if (requestedText) {
@@ -155,6 +157,7 @@ export async function resolveEffectiveChatModel(args: {
                 args.userId,
                 args.db,
                 "throw",
+                args.orgId,
             );
             if (!hasApiKeyForModel(model, args.apiKeys)) {
                 if (args.apiKeys.disabledProviders?.includes(providerForModel(model))) {
@@ -199,6 +202,7 @@ export async function resolveEffectiveChatModel(args: {
             args.userId,
             args.db,
             "fallback",
+            args.orgId,
         );
         if (selected && hasApiKeyForModel(selected, args.apiKeys)) {
             return { ok: true, model: selected, source: candidate.source };

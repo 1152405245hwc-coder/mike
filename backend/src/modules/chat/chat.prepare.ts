@@ -17,7 +17,18 @@ import { resolveRequestTimeZone } from "../../lib/userTime";
 import { attachPriorReasoning, buildDocContext, buildMessages, buildUserPersonalisationPrompt, devLog, enrichWithPriorEvents, loadUserMessageSentTimes, buildWorkflowStore, appendAskInputsResponseToAssistantMessage, runApprovedConnectorActions, generateSpotlightNonce, type AskInputsResponseRequest, type ChatMessage } from "./engine/index";
 import type { McpToolEvent } from "@mike/contracts";
 import { getUserModelSettings, resolveUserChatSelection } from "../user/user.service";
-import { checkProjectAccess, projectHasSharedAudience, resolveContentOrgId } from "../../lib/access";
+import {
+    checkProjectAccess,
+    projectHasSharedAudience,
+    resolveContentOrgId,
+    resolveStandaloneOrgId,
+} from "../../lib/access";
+import { teamOrgIdOf } from "../../lib/personalOrgs";
+import {
+    DOCUMENT_WORKSPACE_MISMATCH_CODE,
+    DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+    findNewAttachmentsOutsideWorkspace,
+} from "../../lib/documentWorkspace";
 import { hasDirectContentGrants } from "../../lib/contentAccess";
 import { can } from "../../lib/permissions";
 import { resolveEffectiveReasoningLevel } from "../../lib/modelSelection";
@@ -64,6 +75,8 @@ export type PreparedChatStream = {
     workflowStore: Awaited<ReturnType<typeof buildWorkflowStore>>;
     legalResearchUs: boolean;
     apiKeys: Awaited<ReturnType<typeof getUserModelSettings>>["api_keys"];
+    /** The organization the chat belongs to, whose keys and model lists apply. */
+    orgId: string | null;
     titleModel: Awaited<
         ReturnType<typeof getUserModelSettings>
     >["title_model"];
@@ -97,6 +110,12 @@ export async function prepareChatStream(
             | undefined;
         /** The browser's IANA time zone; unvalidated request input. */
         requestedTimeZone?: unknown;
+        /**
+         * The organization whose workspace a NEW standalone chat is started
+         * in; unvalidated request input. Not consulted for an existing chat,
+         * or for one in a project.
+         */
+        requestedOrgId?: unknown;
     },
 ): Promise<
     | { ok: true; prepared: PreparedChatStream }
@@ -122,6 +141,9 @@ export async function prepareChatStream(
     // note in modules/project-chat/projectChat.service.ts — this is the same
     // partition on the route that serves standalone and project chats alike.
     let allowDocumentMutation = true;
+    // The organization this chat belongs to: its keys are the ones the turn
+    // runs on (see getEffectiveApiKeys).
+    let contentOrgId: string | null = null;
 
     if (chatId) {
         const access = await getAccessibleChat(db, {
@@ -159,8 +181,14 @@ export async function prepareChatStream(
         // user gets an answer, and an unhandled rejection here used to
         // leave the request open with no response and no log.
         try {
+            // A chat in an organization's project is the project's
+            // audience. One started on its own in an organization is its
+            // author's alone until it is shared, like a personal chat — and
+            // reads the author's memory for that organization, never their
+            // Personal one (see buildMemoryTurn).
             memorySharedAudience =
-                !!existing.org_id ||
+                (existingProjectId !== null &&
+                    (await teamOrgIdOf(db, existing.org_id)) !== null) ||
                 existing.user_id !== userId ||
                 (await hasDirectContentGrants(db, "chat", existing.id));
         } catch (error) {
@@ -169,6 +197,7 @@ export async function prepareChatStream(
         chatTitle = existing.title;
         chatModel = existing.model;
         chatReasoningLevel = existing.reasoning_level;
+        contentOrgId = existing.org_id ?? null;
         if (existingProjectId) {
             // The role above may have come from the chat's own share list;
             // creating documents in the project needs the project's verdict.
@@ -199,12 +228,80 @@ export async function prepareChatStream(
         }
     }
 
+    if (!chatId) {
+        // If creating a chat tied to a project, the user must have access
+        // to the project (own or shared). This runs ahead of the model
+        // selection because the project decides whose keys the chat runs on.
+        const projectAccess = await validateAccessibleProjectId(db, {
+            projectId: resolvedProjectId,
+            userId,
+            userEmail,
+        });
+        if (!projectAccess.ok)
+            return {
+                ok: false,
+                status: projectAccess.status,
+                detail: projectAccess.detail,
+            };
+        if (resolvedProjectId) {
+            const resolvedOrg = await resolveContentOrgId(db, {
+                projectId: resolvedProjectId,
+            });
+            if (!resolvedOrg.ok)
+                return { ok: false, internal: true, error: resolvedOrg.detail };
+            contentOrgId = resolvedOrg.orgId;
+        } else {
+            // Started on its own, the chat belongs to the workspace its
+            // author is in: that organization's keys and models apply from
+            // this first turn.
+            const standalone = await resolveStandaloneOrgId(db, {
+                userId,
+                orgId: args.requestedOrgId,
+            });
+            if (!standalone.ok)
+                return { ok: false, status: 400, detail: standalone.detail };
+            contentOrgId = standalone.orgId;
+        }
+    }
+
+    // A chat is built from documents in its own workspace. Checked before
+    // anything is written, so a refused first message leaves no empty chat
+    // behind.
+    try {
+        let workspaceOrgId = contentOrgId;
+        if (chatId && resolvedProjectId) {
+            // The project says where a project chat lives; a chat row from
+            // before chats carried an organization has none of its own.
+            const projectOrg = await resolveContentOrgId(db, {
+                projectId: resolvedProjectId,
+            });
+            if (!projectOrg.ok)
+                return { ok: false, internal: true, error: projectOrg.detail };
+            workspaceOrgId = projectOrg.orgId;
+        }
+        const outside = await findNewAttachmentsOutsideWorkspace(db, {
+            messages,
+            chatId,
+            orgId: workspaceOrgId,
+        });
+        if (outside.length > 0)
+            return {
+                ok: false,
+                status: 400,
+                code: DOCUMENT_WORKSPACE_MISMATCH_CODE,
+                detail: DOCUMENT_WORKSPACE_MISMATCH_DETAIL,
+            };
+    } catch (error) {
+        return { ok: false, internal: true, error };
+    }
+
     const selection = await resolveUserChatSelection(db, {
         userId,
         chatModel,
         chatReasoningLevel,
         requestedModel: args.requestedModel,
         requestedReasoning: args.requestedReasoning,
+        orgId: contentOrgId,
     });
     if (!selection.ok) return selection;
     const { modelSettings, selectedModel, selectedReasoningLevel } = selection;
@@ -225,33 +322,15 @@ export async function prepareChatStream(
     }
 
     if (!chatId) {
-        // If creating a chat tied to a project, the user must have access
-        // to the project (own or shared).
-        const projectAccess = await validateAccessibleProjectId(db, {
-            projectId: resolvedProjectId,
-            userId,
-            userEmail,
-        });
-        if (!projectAccess.ok)
-            return {
-                ok: false,
-                status: projectAccess.status,
-                detail: projectAccess.detail,
-            };
         canReadProjectMemory = resolvedProjectId !== null;
         canCurateProjectMemory = resolvedProjectId !== null;
 
-        const resolvedOrg = await resolveContentOrgId(db, {
-            projectId: resolvedProjectId,
-        });
-        if (!resolvedOrg.ok)
-            return { ok: false, internal: true, error: resolvedOrg.detail };
         try {
             memorySharedAudience = resolvedProjectId
                 ? await projectHasSharedAudience(
                       db,
                       resolvedProjectId,
-                      resolvedOrg.orgId,
+                      contentOrgId,
                   )
                 : false;
         } catch (error) {
@@ -264,7 +343,7 @@ export async function prepareChatStream(
                 project_id: resolvedProjectId,
                 model: selectedModel,
                 reasoning_level: selectedReasoningLevel,
-                org_id: resolvedOrg.orgId,
+                org_id: contentOrgId,
             })
             .select("id, title")
             .single();
@@ -446,6 +525,7 @@ export async function prepareChatStream(
                 workflowStore,
                 legalResearchUs,
                 apiKeys,
+                orgId: contentOrgId,
                 titleModel,
                 selectedModel,
                 selectedReasoningLevel,

@@ -114,9 +114,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const reportSessionFailure = useCallback(
         (error: unknown) => {
             setAuthError(SESSION_ERROR_MESSAGE);
-            // Sign-in screens show `authError` inline with their own Retry;
-            // a toast there repeated it and then contradicted the form's
-            // next error.
+            // Sign-in screens show `authError` themselves, with their own
+            // Retry; a toast there repeated it and then contradicted the
+            // form's next error.
             if (isOnAuthRoute()) return;
             notifyError(error, {
                 action: "check your session",

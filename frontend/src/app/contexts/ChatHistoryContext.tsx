@@ -12,6 +12,10 @@ import {
 } from "react";
 import { useAuth } from "@/app/contexts/AuthContext";
 import {
+    useWorkspaceOrgId,
+    useWorkspaceParam,
+} from "@/app/contexts/WorkspaceContext";
+import {
     createChat,
     deleteChat,
     listChats,
@@ -71,11 +75,21 @@ function cursorFor(chat: Chat | undefined): ChatCursor | null {
 
 export function ChatHistoryProvider({ children }: { children: ReactNode }) {
     const { user } = useAuth();
+    // The sidebar history follows the active workspace: switching re-reads
+    // the first page, through loadChats's identity changing below.
+    const workspace = useWorkspaceParam();
+    const workspaceOrgId = useWorkspaceOrgId();
     const [chats, setChats] = useState<Chat[] | null>(null);
     const [hasMoreChats, setHasMoreChats] = useState(false);
     const [loadingMoreChats, setLoadingMoreChats] = useState(false);
     const loadingMoreChatsRef = useRef(false);
     const nextChatCursorRef = useRef<ChatCursor | null>(null);
+    // Which first-page read is current, and which workspace the list on
+    // screen came from. A switch must not leave the previous workspace's
+    // history showing, and its slower answer must not land on top of the new
+    // one.
+    const chatsRequestRef = useRef(0);
+    const loadedWorkspaceRef = useRef<string | undefined>(undefined);
     const [currentChatId, setCurrentChatId] = useState<string | null>(null);
     const [sideChatId, setSideChatId] = useState<string | null>(null);
     const [sideChatRequest, requestSideChat] = useState<string | null>(null);
@@ -90,18 +104,30 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
             return;
         }
 
+        const request = ++chatsRequestRef.current;
+        if (loadedWorkspaceRef.current !== workspace) {
+            loadedWorkspaceRef.current = workspace;
+            setChats(null);
+            setHasMoreChats(false);
+            nextChatCursorRef.current = null;
+        }
         try {
-            const data = await listChats({ limit: INITIAL_CHAT_LIMIT + 1 });
+            const data = await listChats({
+                limit: INITIAL_CHAT_LIMIT + 1,
+                workspace,
+            });
+            if (request !== chatsRequestRef.current) return;
             const page = data.slice(0, INITIAL_CHAT_LIMIT);
             setChats(sortChatsByActivity(page));
             nextChatCursorRef.current = cursorFor(page.at(-1));
             setHasMoreChats(data.length > INITIAL_CHAT_LIMIT);
         } catch {
+            if (request !== chatsRequestRef.current) return;
             setChats([]);
             nextChatCursorRef.current = null;
             setHasMoreChats(false);
         }
-    }, [user]);
+    }, [user, workspace]);
 
     useEffect(() => {
         if (!user) {
@@ -139,7 +165,11 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
                 limit: CHAT_PAGE_SIZE + 1,
                 beforeUpdatedAt: cursor.updatedAt,
                 beforeId: cursor.id,
+                workspace,
             });
+            // The workspace changed while this page was in flight: it
+            // belongs to a list that is no longer on screen.
+            if (loadedWorkspaceRef.current !== workspace) return;
             const page = data.slice(0, CHAT_PAGE_SIZE);
             nextChatCursorRef.current = cursorFor(page.at(-1));
             setChats((current) => {
@@ -158,7 +188,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
             loadingMoreChatsRef.current = false;
             setLoadingMoreChats(false);
         }
-    }, [chats, hasMoreChats, user]);
+    }, [chats, hasMoreChats, user, workspace]);
 
     useEffect(
         () =>
@@ -204,8 +234,14 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
             projectRole?: ProjectRole | null,
         ): Promise<string | null> => {
             try {
+                // A chat started on its own belongs to the workspace it is
+                // started in; inside a project, the project decides.
                 const { id } = await createChat(
-                    projectId ? { project_id: projectId } : undefined,
+                    projectId
+                        ? { project_id: projectId }
+                        : workspaceOrgId
+                          ? { org_id: workspaceOrgId }
+                          : undefined,
                 );
                 const now = new Date().toISOString();
                 // The optimistic row must say what the server would say.
@@ -247,7 +283,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
                 return null;
             }
         },
-        [user],
+        [user, workspaceOrgId],
     );
 
     const renameChatFn = useCallback(

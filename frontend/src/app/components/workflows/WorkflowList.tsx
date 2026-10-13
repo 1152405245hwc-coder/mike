@@ -30,6 +30,7 @@ import { NewWorkflowModal } from "./NewWorkflowModal";
 import { TableToolbar } from "../shared/TableToolbar";
 import { RowActionMenuItems, RowActions } from "../shared/RowActions";
 import { PageHeader } from "@/app/components/shared/PageHeader";
+import { PAGE_HEADER_TITLE_CLASS } from "@/app/components/shared/pageHeaderStyles";
 import { SubfolderSvgIcon } from "@/app/components/shared/FolderSvgIcon";
 import { EmptyState } from "@/app/components/ui/empty-state";
 import { LIQUID_GLASS_HOVER_CLASS } from "@/app/components/ui/liquid-surface";
@@ -45,6 +46,7 @@ import { ConfirmPopup } from "../popups/ConfirmPopup";
 import { WorkflowAddonPreviewModal } from "./WorkflowAddonPreviewModal";
 import { TableLoadMoreRow } from "@/app/components/shared/TableLoadMoreRow";
 import { userFacingApiError } from "@/app/lib/userFacingError";
+import { useWorkspaceParam } from "@/app/contexts/WorkspaceContext";
 import {
   SkeletonCheckbox,
   SkeletonLine,
@@ -79,10 +81,12 @@ const WORKFLOW_TABS: { id: WorkflowListTab; label: string }[] = [
 ];
 const WORKFLOW_TAB_IDS = WORKFLOW_TABS.map((tab) => tab.id);
 
-type AccessFilter = "private" | "shared";
+// Public: open to the whole organization. Private: everything else, whether
+// it is its creator's alone or shared with individuals.
+type AccessFilter = "public" | "private";
 const ACCESS_FILTER_OPTIONS: TableFilterOption<AccessFilter>[] = [
+  { value: "public", label: "Public" },
   { value: "private", label: "Private" },
-  { value: "shared", label: "Shared" },
 ];
 
 function workflowFilterOptions(
@@ -113,6 +117,7 @@ export function WorkflowList({
   const [addonsLoading, setAddonsLoading] = useState(true);
   const [selected, setSelected] = useState<Workflow | null>(null);
   const [newModalOpen, setNewModalOpen] = useState(false);
+  const workspace = useWorkspaceParam();
   const [activeTab, setActiveTab] = useQueryParamTab(
     WORKFLOW_TAB_IDS,
     packKey ? "addons" : initialTab,
@@ -186,9 +191,9 @@ export function WorkflowList({
     jurisdictionFilter,
     scope:
       accessFilter === "private"
-        ? "private"
-        : accessFilter === "shared"
-          ? "collaborative"
+        ? "nonpublic"
+        : accessFilter === "public"
+          ? "public"
           : "all",
     sort: nameSortDirection
       ? { key: "name", direction: nameSortDirection }
@@ -210,6 +215,7 @@ export function WorkflowList({
     const controller = new AbortController();
     void getWorkflowFilterOptions({
       type: selectedType,
+      workspace,
       signal: controller.signal,
     })
       .then((options) => {
@@ -225,7 +231,7 @@ export function WorkflowList({
         }
       });
     return () => controller.abort();
-  }, [activeTab, selectedType]);
+  }, [activeTab, selectedType, workspace]);
 
 
   const query = search.trim().toLowerCase();
@@ -515,7 +521,7 @@ export function WorkflowList({
           },
         ]}
       >
-        <h1 className="font-serif text-2xl font-medium text-gray-900">
+        <h1 className={`${PAGE_HEADER_TITLE_CLASS} text-gray-900`}>
           Workflows
         </h1>
       </PageHeader>

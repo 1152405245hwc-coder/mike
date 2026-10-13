@@ -1,6 +1,30 @@
 import type { Db } from "./supabase";
 import type { ProjectRole } from "./permissions";
 
+// Declared here rather than imported from ./access, which imports this file.
+type OrgRole = "owner" | "admin" | "member";
+
+function isOrgRole(value: unknown): value is OrgRole {
+    return value === "owner" || value === "admin" || value === "member";
+}
+
+/**
+ * An organization's owners hold Owner implicitly on what is public, and on a
+ * private item only once it has no Owner left among the organization's
+ * members — so that no matter is ever orphaned. On a member's private item
+ * they have no standing they were not given, like everybody else.
+ * (resolveOrgContentRole in ./access is the same rule for one caller.)
+ */
+function hasImplicitOwnerAccess(
+    role: OrgRole,
+    item: { visibility: unknown; ownerless: boolean },
+): boolean {
+    return (
+        role === "owner" &&
+        (item.visibility === "organization" || item.ownerless)
+    );
+}
+
 export type OrgResourceKind =
     | "project"
     | "workflow";
@@ -63,7 +87,7 @@ export async function findOrgMemberByEmail(
 ): Promise<
     | {
           ok: true;
-          member: { userId: string; email: string; orgRole: "admin" | "member" };
+          member: { userId: string; email: string; orgRole: OrgRole };
       }
     | { ok: false; kind: "not_found" | "db_error"; detail: string }
 > {
@@ -101,7 +125,7 @@ export async function findOrgMemberByEmail(
             detail: "Only current organization members can be assigned a role",
         };
     const orgRole = (membership as { role?: unknown }).role;
-    if (orgRole !== "admin" && orgRole !== "member")
+    if (!isOrgRole(orgRole))
         return {
             ok: false,
             kind: "db_error",
@@ -110,8 +134,12 @@ export async function findOrgMemberByEmail(
     return { ok: true, member: { userId, email, orgRole } };
 }
 
-/** A resource creator and an organization admin retain owner access. Keep the
- * target lookup and this rule identical for project and workflow assignments.
+/** The creator is always an Owner, and an organization owner always owns a
+ * public item, so neither can be given a role or denied there. Everyone else
+ * in the organization can — and so can an organization owner on a PRIVATE
+ * item, which is not theirs unless it is shared with them. Keep the target
+ * lookup and this rule identical for project and workflow assignments (the
+ * database's validate_org_access_override enforces the same).
  * Callers still authorize the actor's access.manage permission first.
  */
 export async function findAssignableOrgMember(
@@ -119,13 +147,15 @@ export async function findAssignableOrgMember(
     orgId: string,
     email: string,
     creatorId: string | null,
+    /** The item's visibility; anything but "organization" is private. */
+    visibility: unknown,
 ): Promise<
     | {
           ok: true;
           member: {
               userId: string;
               email: string;
-              orgRole: "admin" | "member";
+              orgRole: OrgRole;
           };
       }
     | { ok: false; kind: "validation"; detail: string }
@@ -143,15 +173,23 @@ export async function findAssignableOrgMember(
             kind: "validation",
             detail: "The creator is always an owner",
         };
-    if (target.member.orgRole === "admin")
+    if (target.member.orgRole === "owner" && visibility === "organization")
         return {
             ok: false,
             kind: "validation",
-            detail: "Organization admins always have owner access",
+            detail: "Organization owners always own a public item",
         };
     return target;
 }
 
+/**
+ * The people an organization's project or workflow concerns: everyone who can
+ * open it, with the role they hold, plus anyone walled off from it (`deny`).
+ *
+ * A member the item has not been shared with is NOT listed. In a private item
+ * that is most of the organization, and listing them at a role they do not
+ * hold is how a roster starts lying about who can read a matter.
+ */
 export async function listOrgAccessPeople(
     db: Db,
     params: {
@@ -159,6 +197,8 @@ export async function listOrgAccessPeople(
         resourceId: string;
         orgId: string;
         creatorId: string | null;
+        /** The item's visibility; anything but "organization" is private. */
+        visibility: unknown;
     },
 ): Promise<
     | { ok: true; people: OrgAccessPerson[] }
@@ -178,7 +218,7 @@ export async function listOrgAccessPeople(
 
     const memberRows = (memberships ?? []) as {
         user_id: string;
-        role: "admin" | "member";
+        role: OrgRole;
     }[];
     const userIds = memberRows.map(
         (membership) => membership.user_id,
@@ -202,22 +242,38 @@ export async function listOrgAccessPeople(
             display_name: string | null;
         }[]).map((profile) => [profile.user_id, profile]),
     );
+    // No Owner left among the members: the creator is not one of them and
+    // nobody else was made an Owner. Both lists are complete here, so this is
+    // the same answer the database's *_is_ownerless functions give.
+    const ownerless =
+        !memberRows.some(
+            (membership) => membership.user_id === params.creatorId,
+        ) && !listed.overrides.some((override) => override.role === "owner");
     const people: OrgAccessPerson[] = [];
     for (const membership of memberRows) {
         const userId = membership.user_id;
         const profile = profileByUserId.get(userId);
         if (!profile?.email) continue;
+        const implicitOwner =
+            userId === params.creatorId ||
+            hasImplicitOwnerAccess(membership.role, {
+                visibility: params.visibility,
+                ownerless,
+            });
+        const override = implicitOwner
+            ? undefined
+            : overrideByUserId.get(userId);
+        const role: OrgAssignableRole | null = implicitOwner
+            ? "owner"
+            : (override ??
+              (params.visibility === "organization" ? "editor" : null));
+        if (!role) continue;
         people.push({
             user_id: userId,
             email: profile.email,
             display_name: profile.display_name ?? null,
-            role:
-                userId === params.creatorId || membership.role === "admin"
-                    ? "owner"
-                    : overrideByUserId.get(userId) ??
-                      "editor",
-            has_override:
-                membership.role !== "admin" && overrideByUserId.has(userId),
+            role,
+            has_override: override !== undefined,
         });
     }
     return { ok: true, people };

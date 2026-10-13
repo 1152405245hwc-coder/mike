@@ -12,6 +12,11 @@ import {
     uploadStandaloneDocuments,
 } from "@/app/lib/mikeApi";
 import type { AccessAssignmentRole } from "@/app/lib/mikeApi";
+import {
+    useDocumentWorkspace,
+    useWorkspace,
+    useWorkspaceOrgId,
+} from "@/app/contexts/WorkspaceContext";
 import { userFacingApiError } from "@/app/lib/userFacingError";
 import {
     SUPPORTED_DOCUMENT_ACCEPT,
@@ -27,16 +32,18 @@ import { ToggleSwitchUI } from "@/shared/ui/ToggleSwitchUI";
 import { ModelToggle } from "../assistant/ModelToggle";
 import {
     isRouterModelSelected,
-    routerSelections,
     type NoModelsReason,
 } from "@/shared/lib/modelCatalog";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
+import { useModelApiKeys } from "@/app/hooks/useModelApiKeys";
+import { useModelRouterSelections } from "@/app/hooks/useModelRouterSelections";
 import { isModelAvailable } from "@/app/lib/modelAvailability";
 import { NoModelsWarningPopup } from "../popups/NoModelsWarningPopup";
 import { useAuth } from "@/app/contexts/AuthContext";
 import {
     CreateAccessStep,
     type PendingDirectGrant,
+    type PendingOrgOverride,
 } from "../modals/CreateAccessStep";
 import { useConfiguredModels } from "@/app/hooks/useConfiguredModels";
 
@@ -84,6 +91,9 @@ export function NewTRModal({
     projectName,
     projectCmNumber,
 }: Props) {
+    // A document uploaded on its own belongs to the workspace it is
+    // uploaded in.
+    const workspace = useDocumentWorkspace();
     const isProjectMode = projectId !== undefined;
     const [step, setStep] = useState<"details" | "access" | "documents">(
         "details",
@@ -92,13 +102,20 @@ export function NewTRModal({
     const [underProject, setUnderProject] = useState(false);
     const [selectedProjectId, setSelectedProjectId] = useState("");
     const [directGrants, setDirectGrants] = useState<PendingDirectGrant[]>([]);
+    // In an organization's workspace a review started on its own belongs to
+    // that organization and is shared with its members only: they are picked
+    // from the roster here, and given access by address once it exists. The
+    // id is the one the review is created under, so the two cannot disagree.
+    const { activeOrganization } = useWorkspace();
+    const workspaceOrgId = useWorkspaceOrgId() ?? null;
+    const [memberGrants, setMemberGrants] = useState<PendingOrgOverride[]>([]);
     const [selectedModel, setSelectedModel] = useState("");
     const [noModelsWarning, setNoModelsWarning] =
         useState<NoModelsReason | null>(null);
-    const { profile, loading: profileLoading, apiKeysDegraded } =
-        useUserProfile();
+    const { profile, loading: profileLoading } = useUserProfile();
     const { user } = useAuth();
-    const apiKeys = apiKeysDegraded ? undefined : profile?.apiKeys;
+    const apiKeys = useModelApiKeys();
+    const modelRouterSelections = useModelRouterSelections();
     const configuredModels = useConfiguredModels();
     const configuredModelIds = useMemo(
         () => configuredModels.map((model) => model.id),
@@ -187,17 +204,17 @@ export function NewTRModal({
     useEffect(() => {
         if (!open || !profile?.tabularModel) return;
         const defaultModel = profile.tabularModel;
-        const routerSelectionValid = isRouterModelSelected(
-            defaultModel,
-            routerSelections(profile),
-        );
+        // Unknown lists (an organization's, still loading) preselect nothing.
+        const routerSelectionValid =
+            !!modelRouterSelections &&
+            isRouterModelSelected(defaultModel, modelRouterSelections);
         const providerAvailable =
             !apiKeys ||
             isModelAvailable(defaultModel, apiKeys, configuredModelIds);
         if (routerSelectionValid && providerAvailable) {
             setSelectedModel((current) => current || defaultModel);
         }
-    }, [apiKeys, configuredModelIds, open, profile]);
+    }, [apiKeys, configuredModelIds, modelRouterSelections, open, profile]);
 
     // Preselect every project document once, as soon as they're available —
     // which may be after the modal opened, since the parent's list is empty
@@ -229,6 +246,7 @@ export function NewTRModal({
         setUnderProject(false);
         setSelectedProjectId("");
         setDirectGrants([]);
+        setMemberGrants([]);
         setSelectedModel("");
         setNoModelsWarning(null);
         setProjectDocs([]);
@@ -272,7 +290,21 @@ export function NewTRModal({
             : underProject
               ? selectedProjectId
               : undefined;
-        const assignments = effectiveProjectId ? [] : directGrants;
+        const assignments: PendingDirectGrant[] = effectiveProjectId
+            ? []
+            : workspaceOrgId
+              ? memberGrants.flatMap((grant) =>
+                    grant.role === "deny"
+                        ? []
+                        : [
+                              {
+                                  email: grant.email,
+                                  display_name: null,
+                                  role: grant.role,
+                              },
+                          ],
+                )
+              : directGrants;
         try {
             const partialFailure = await onAdd(
                 title.trim(),
@@ -313,6 +345,7 @@ export function NewTRModal({
         try {
             const proj = await getProject(projectId);
             setDirectGrants([]);
+            setMemberGrants([]);
             const docs = (proj.documents ?? []).filter(
                 (d) => d.status === "ready",
             );
@@ -353,6 +386,8 @@ export function NewTRModal({
                   )
                 : await uploadStandaloneDocuments(
                       supported.map((file) => ({ file })),
+                      undefined,
+                      workspace,
                   );
             const uploaded = outcomes.flatMap((outcome) =>
                 outcome.status === "completed" && outcome.result
@@ -504,6 +539,7 @@ export function NewTRModal({
                             type: "button",
                             onClick: () => {
                                 setDirectGrants([]);
+                                setMemberGrants([]);
                                 setStep("documents");
                             },
                             disabled: uploading,
@@ -586,9 +622,7 @@ export function NewTRModal({
                                 onChange={setSelectedModel}
                                 apiKeys={apiKeys}
                                 apiKeysLoading={profileLoading && !profile}
-                                routerSelections={
-                                    profile ? routerSelections(profile) : undefined
-                                }
+                                routerSelections={modelRouterSelections}
                                 onNoModelsClick={setNoModelsWarning}
                                 modalInput
                             />
@@ -657,11 +691,14 @@ export function NewTRModal({
                     </div>
                 ) : step === "access" ? (
                     <CreateAccessStep
-                        orgId={null}
+                        orgId={workspaceOrgId}
+                        organizationName={activeOrganization?.name ?? null}
                         currentUserEmail={user?.email ?? null}
                         currentUserId={user?.id ?? null}
                         directGrants={directGrants}
                         onDirectGrantsChange={setDirectGrants}
+                        orgOverrides={memberGrants}
+                        onOrgOverridesChange={setMemberGrants}
                         inheritedFromProject={isProjectMode || underProject}
                         inheritedProjectId={
                             isProjectMode
@@ -671,6 +708,7 @@ export function NewTRModal({
                                   : null
                         }
                         ownerLabel="Review owners"
+                        resourceNoun="review"
                     />
                 ) : (
                     <div className="flex min-h-0 flex-1 flex-col">

@@ -140,9 +140,14 @@ The Word add-in supplies the same two variables from
 De facto type scale in the app chrome, most to least common: `text-xs` (dense
 table and control text — the default for most chrome), `text-sm` (body copy,
 normal-size buttons), `text-[10px]` (badges, superscript citations),
-`text-2xl font-serif` (display headings and empty states). There is no separate
-heading component; use `EmptyState` for empty-state headings and `PageHeader`
-for page titles so the display style stays in one place.
+`text-2xl font-serif` (display headings and empty states), `text-xl font-serif`
+(page titles and breadcrumbs). There is no separate heading component; use
+`EmptyState` for empty-state headings and `PageHeader` for page titles so the
+display style stays in one place. A plain page title is an `<h1>` passed as
+`PageHeader`'s children with `PAGE_HEADER_TITLE_CLASS` (from
+`shared/pageHeaderStyles.ts`), which is also what its breadcrumbs use. `PAGE_HEADER_ROW_CLASS` is what
+keeps that title on the line of the sidebar's logo text. The settings areas
+(`SettingsShell`) have a larger display title of their own, `text-3xl`.
 
 ## Spacing and radius
 
@@ -429,9 +434,12 @@ its own (the API client, a stream callback, the offline listener) calls
 `notifyError`; `AppToasts` draws what it raises with `WarningPopup`,
 including any Retry and Contact support actions.
 
-Every button or link in a notice's action row is a small black pill:
-`WarningPopup`'s `primaryAction`, a toast's actions, and Contact support.
-Use `noticeActionClassName()` for a link that has to look like one.
+No two actions on one notice share a look. The last action in the row is the
+primary one and is a black pill (`WarningPopup`'s `primaryAction` always
+is); the one before it is a white pill; any further action is plain text.
+Contact support comes first in the row, so it is black only when it is the
+sole action. Style a custom action with
+`noticeActionClassName(noticeActionEmphasis(index, count))`.
 
 Use a **toast** only for a short confirmation ("Changes saved") or
 information.
