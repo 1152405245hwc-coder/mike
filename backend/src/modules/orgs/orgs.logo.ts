@@ -20,17 +20,19 @@ type LogoContentType = "image/png" | "image/jpeg" | "image/webp";
 // What each accepted format begins with. The declared type is the client's
 // word; these are the file's. SVG is deliberately absent: it is a document
 // that can carry script, not a picture.
-const SIGNATURES: Record<LogoContentType, (bytes: Buffer) => boolean> = {
-    "image/png": (bytes) =>
-        bytes
-            .subarray(0, 8)
-            .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
-    "image/jpeg": (bytes) =>
-        bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff,
-    "image/webp": (bytes) =>
-        bytes.subarray(0, 4).toString("latin1") === "RIFF" &&
-        bytes.subarray(8, 12).toString("latin1") === "WEBP",
-};
+function hasLogoSignature(contentType: LogoContentType, bytes: Buffer): boolean {
+    switch (contentType) {
+        case "image/png":
+            return bytes.subarray(0, 8).equals(
+                Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            );
+        case "image/jpeg":
+            return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+        case "image/webp":
+            return bytes.subarray(0, 4).toString("latin1") === "RIFF" &&
+                bytes.subarray(8, 12).toString("latin1") === "WEBP";
+    }
+}
 
 const DATA_URL = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
 
@@ -53,12 +55,14 @@ export function parseOrgLogoDataUrl(
         return { ok: false, detail: "The logo is too large. Use an image under 512 KB." };
     const match = DATA_URL.exec(value);
     if (!match) return { ok: false, detail: UNSUPPORTED };
-    const contentType = match[1] as LogoContentType;
+    const contentType = match[1];
+    if (contentType !== "image/png" && contentType !== "image/jpeg" && contentType !== "image/webp")
+        return { ok: false, detail: UNSUPPORTED };
     const bytes = Buffer.from(match[2], "base64");
     if (bytes.length === 0) return { ok: false, detail: UNSUPPORTED };
     if (bytes.length > MAX_ORG_LOGO_BYTES)
         return { ok: false, detail: "The logo is too large. Use an image under 512 KB." };
-    if (!SIGNATURES[contentType](bytes))
+    if (!hasLogoSignature(contentType, bytes))
         return { ok: false, detail: UNSUPPORTED };
     // Re-encoded from the decoded bytes, so what is stored is canonical.
     return { ok: true, contentType, base64: bytes.toString("base64") };
