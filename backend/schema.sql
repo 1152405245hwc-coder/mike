@@ -1199,11 +1199,22 @@ create table if not exists public.library_folders (
   library_kind text not null default 'file',
   name text not null,
   parent_folder_id uuid references public.library_folders(id) on delete cascade,
+  -- The workspace the folder is in: an organization, or null for Personal.
+  -- A person's library is per workspace, and private to them in each.
+  org_id uuid,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint library_folders_kind_check
-    check (library_kind in ('file', 'template'))
+    check (library_kind in ('file', 'template')),
+  -- Tied to the membership, as a person's memory for a workspace is:
+  -- leaving, being removed and the organization being deleted all take it.
+  constraint library_folders_workspace_member_fkey
+    foreign key (org_id, user_id)
+    references public.org_members(org_id, user_id) on delete cascade
 );
+
+create index if not exists idx_library_folders_org
+  on public.library_folders(org_id) where org_id is not null;
 
 create index if not exists idx_library_folders_user_kind
   on public.library_folders(user_id, library_kind);
@@ -3669,7 +3680,8 @@ create or replace function public.search_library_documents(
   p_search_term text default null,
   p_file_type text default null,
   p_sort_key text default 'updated',
-  p_sort_direction text default 'desc'
+  p_sort_direction text default 'desc',
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -3718,6 +3730,7 @@ as $$
     on v.id = d.current_version_id
    and v.deleted_at is null
   where d.user_id::text = p_user_id
+    and public.workspace_matches(p_workspace, d.org_id)
     and d.project_id is null
     and (
       (p_library_kind = 'file' and coalesce(d.library_kind, 'file') = 'file')
@@ -3755,7 +3768,8 @@ $$;
 
 create or replace function public.get_library_filter_options(
   p_user_id text,
-  p_library_kind text
+  p_library_kind text,
+  p_workspace text default null
 )
 returns table (file_types text[])
 language sql
@@ -3771,6 +3785,7 @@ as $$
     on v.id = d.current_version_id
    and v.deleted_at is null
   where d.user_id::text = p_user_id
+    and public.workspace_matches(p_workspace, d.org_id)
     and d.project_id is null
     and (
       (p_library_kind = 'file' and coalesce(d.library_kind, 'file') = 'file')
@@ -4545,7 +4560,8 @@ create or replace function public.get_library_document_ids(
   p_search_term text,
   p_file_type text,
   p_limit integer,
-  p_offset integer
+  p_offset integer,
+  p_workspace text default null
 )
 returns table (
   id uuid,
@@ -4560,6 +4576,7 @@ as $$
     on v.id = d.current_version_id
    and v.deleted_at is null
   where d.user_id::text = p_user_id
+    and public.workspace_matches(p_workspace, d.org_id)
     and d.project_id is null
     and (
       (p_library_kind = 'file' and coalesce(d.library_kind, 'file') = 'file')
@@ -4701,7 +4718,8 @@ create or replace function public.resolve_library_folder_path(
   target_library_kind text,
   base_folder_id uuid,
   path_segments text[],
-  conflict_resolution text default 'error'
+  conflict_resolution text default 'error',
+  target_org_id uuid default null
 )
 returns jsonb
 language plpgsql
@@ -4734,13 +4752,15 @@ begin
     where id = base_folder_id
       and user_id = target_user_id
       and library_kind = target_library_kind
+      and org_id is not distinct from target_org_id
   ) then
     raise exception 'Parent folder not found';
   end if;
 
   perform pg_advisory_xact_lock(
     hashtextextended(
-      'library-folder-path:' || target_user_id::text || ':' || target_library_kind,
+      'library-folder-path:' || target_user_id::text || ':' || target_library_kind
+        || ':' || coalesce(target_org_id::text, 'personal'),
       0
     )
   );
@@ -4756,6 +4776,7 @@ begin
     from public.library_folders
     where user_id = target_user_id
       and library_kind = target_library_kind
+      and org_id is not distinct from target_org_id
       and parent_folder_id is not distinct from current_parent_id
       and lower(btrim(name)) = lower(segment)
     order by created_at, id
@@ -4769,6 +4790,7 @@ begin
           select 1 from public.library_folders
           where user_id = target_user_id
             and library_kind = target_library_kind
+            and org_id is not distinct from target_org_id
             and parent_folder_id is not distinct from current_parent_id
             and lower(btrim(name)) = lower(candidate_name)
         );
@@ -4790,9 +4812,10 @@ begin
 
     if folder_row.id is null then
       insert into public.library_folders (
-        user_id, library_kind, name, parent_folder_id
+        user_id, library_kind, name, parent_folder_id, org_id
       ) values (
-        target_user_id, target_library_kind, resolved_name, current_parent_id
+        target_user_id, target_library_kind, resolved_name, current_parent_id,
+        target_org_id
       ) returning * into folder_row;
     end if;
 
@@ -4818,9 +4841,9 @@ revoke all on function public.resolve_project_folder_path(uuid, uuid, uuid, text
 grant execute on function public.resolve_project_folder_path(uuid, uuid, uuid, text[], text)
   to service_role;
 
-revoke all on function public.resolve_library_folder_path(uuid, text, uuid, text[], text)
+revoke all on function public.resolve_library_folder_path(uuid, text, uuid, text[], text, uuid)
   from public, anon, authenticated;
-grant execute on function public.resolve_library_folder_path(uuid, text, uuid, text[], text)
+grant execute on function public.resolve_library_folder_path(uuid, text, uuid, text[], text, uuid)
   to service_role;
 
 create or replace function public.create_upload_session(
@@ -7340,9 +7363,10 @@ create trigger org_members_cleanup_admin_overrides
 -- itself was deleted — the organization's owners take them over
 -- (project_is_ownerless / workflow_is_ownerless).
 --
--- Standalone chats and tabular reviews are private to their author and are
--- handed to nobody: they are deleted with the membership, unless another
--- member holds an Owner grant on them. The grants the member held on other
+-- Standalone chats and tabular reviews, and a member's own documents in the
+-- organization's workspace, are private to their author and are handed to
+-- nobody: they are deleted with the membership, unless (for a chat or review)
+-- another member holds an Owner grant on them. The grants the member held on other
 -- people's go too, so rejoining later does not quietly restore what they
 -- could open before.
 
@@ -7507,7 +7531,17 @@ as $$
       where g.tabular_review_id = r.id
         and g.role = 'owner'
         and holder.user_id <> p_user_id
-    );
+    )
+  union all
+  -- Their own documents in the organization's workspace: what they uploaded
+  -- to the library there or attached to a chat. One in a project or a
+  -- workflow belongs to that, and stays.
+  select 'document'::text, d.id
+  from public.documents d
+  where d.org_id = p_org_id
+    and d.project_id is null
+    and d.workflow_id is null
+    and d.user_id = p_user_id;
 $$;
 
 
@@ -7545,6 +7579,11 @@ begin
     delete from public.tabular_reviews r
     using public.org_member_private_standalone(old.org_id, old.user_id) gone
     where gone.kind = 'tabular_review' and r.id = gone.item_id;
+    -- Deleting the row retires its versions, and their stored files with
+    -- them (queue_document_version_cleanup).
+    delete from public.documents d
+    using public.org_member_private_standalone(old.org_id, old.user_id) gone
+    where gone.kind = 'document' and d.id = gone.item_id;
   end if;
   return old;
 end;
@@ -8655,5 +8694,6 @@ insert into public.schema_migrations (filename) values
   ('20261012_06_personal_organizations.sql'),
   ('20261012_07_standalone_org_content.sql'),
   ('20261013_01_member_handover.sql'),
-  ('20261013_02_workspace_memory.sql')
+  ('20261013_02_workspace_memory.sql'),
+  ('20261013_03_workspace_library.sql')
 on conflict (filename) do nothing;

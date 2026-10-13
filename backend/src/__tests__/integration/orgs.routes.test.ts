@@ -576,6 +576,7 @@ describe("org membership", () => {
                 workflows: [],
                 chats: 1,
                 reviews: 0,
+                documents: 0,
             });
         });
 
