@@ -341,6 +341,7 @@ export async function runLLMStream(params: {
     systemPrompt: baseSystemPrompt,
     include: includeMemory,
     projectId: memoryProjectId,
+    orgId,
     sharedAudience: memorySharedAudience,
   });
   const systemPrompt = memory.systemPrompt;

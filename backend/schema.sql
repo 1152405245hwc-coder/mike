@@ -5420,6 +5420,11 @@ create table if not exists public.memory_files (
   scope text not null check (scope in ('user', 'project')),
   user_id uuid references auth.users(id) on delete cascade,
   project_id uuid references public.projects(id) on delete cascade,
+  -- For a 'user' file: the organization whose workspace it is the person's
+  -- memory for, or null for Personal. A person has one per workspace, each
+  -- private to them; a conversation reads and learns only its own
+  -- workspace's (memory_source_org_id).
+  org_id uuid,
   enabled boolean not null default true,
   epoch bigint not null default 0 check (epoch >= 0),
   -- Monotonic change token for compare-and-swap. Nothing is retained per
@@ -5445,11 +5450,23 @@ create table if not exists public.memory_files (
   updated_at timestamptz not null default now(),
   constraint memory_files_scope_owner_check check (
     (scope = 'user' and user_id is not null and project_id is null)
-    or (scope = 'project' and project_id is not null and user_id is null)
-  )
+    or (scope = 'project' and project_id is not null and user_id is null
+        and org_id is null)
+  ),
+  -- Tied to the membership, not just to the organization: leaving, being
+  -- removed, and the organization being deleted all take it away.
+  constraint memory_files_workspace_member_fkey
+    foreign key (org_id, user_id)
+    references public.org_members(org_id, user_id) on delete cascade
 );
-create unique index if not exists memory_files_user_unique
-  on public.memory_files(user_id);
+-- One file per person per workspace. Two partial indexes rather than one
+-- over (user_id, org_id): null is Personal, and nulls are distinct.
+create unique index if not exists memory_files_user_personal_unique
+  on public.memory_files(user_id) where org_id is null;
+create unique index if not exists memory_files_user_workspace_unique
+  on public.memory_files(user_id, org_id) where org_id is not null;
+create index if not exists memory_files_org_idx
+  on public.memory_files(org_id) where org_id is not null;
 create unique index if not exists memory_files_project_unique
   on public.memory_files(project_id);
 
@@ -5609,7 +5626,7 @@ as $$
 begin
   insert into public.memory_files(scope, user_id, enabled)
   values ('user', new.id, true)
-  on conflict (user_id) do nothing;
+  on conflict do nothing;
   return new;
 end;
 $$;
@@ -6148,6 +6165,80 @@ as $$
        + coalesce((select count(*) from marked), 0)::integer;
 $$;
 
+-- The workspace a conversation's own-memory belongs to: the team
+-- organization of a chat started on its own there, otherwise null —
+-- Personal. A chat in a project, a Word chat and a tabular review chat are
+-- never a workspace's: what they may learn is decided by
+-- memory_source_allows_app_memory.
+create or replace function public.memory_source_org_id(
+  p_surface text,
+  p_conversation_id uuid
+)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select case when p_surface = 'chat' then (
+    select chat.org_id
+    from public.chats chat
+    where chat.id = p_conversation_id
+      and chat.project_id is null
+      and public.org_is_team(chat.org_id)
+  ) end;
+$$;
+
+-- A person's memory file for one workspace, created if it is not there.
+-- Returns nothing for an organization they do not belong to.
+--
+-- A new workspace memory starts as the person left their Personal one:
+-- somebody who turned memory off has not asked for it back because they
+-- opened a chat in their firm.
+create or replace function public.ensure_user_memory_file(
+  p_user_id uuid,
+  p_org_id uuid
+)
+returns setof public.memory_files
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if p_org_id is not null and not exists (
+    select 1 from public.org_members member
+    where member.org_id = p_org_id and member.user_id = p_user_id
+  ) then
+    return;
+  end if;
+  if not exists (
+    select 1 from public.memory_files file
+    where file.scope = 'user'
+      and file.user_id = p_user_id
+      and file.org_id is not distinct from p_org_id
+  ) then
+    insert into public.memory_files(scope, user_id, org_id, enabled)
+    values (
+      'user',
+      p_user_id,
+      p_org_id,
+      coalesce((
+        select personal.enabled from public.memory_files personal
+        where personal.scope = 'user'
+          and personal.user_id = p_user_id
+          and personal.org_id is null
+      ), true)
+    )
+    on conflict do nothing;
+  end if;
+  return query
+    select file.* from public.memory_files file
+    where file.scope = 'user'
+      and file.user_id = p_user_id
+      and file.org_id is not distinct from p_org_id;
+end;
+$$;
+
 create or replace function public.memory_project_is_private(
   p_project_id uuid
 )
@@ -6189,6 +6280,11 @@ as $$
   -- conversation itself (its owner, organization, and direct grants) and,
   -- when it lives in a project, of the project too. The read path in the
   -- routes applies the same three tests before showing app memory.
+  --
+  -- A chat started on its own in a team organization's workspace is private
+  -- to its author too, and learns into that author's memory FOR THAT
+  -- WORKSPACE (memory_source_org_id says which). A chat in an organization's
+  -- project is the project's, and never learns into anybody's own memory.
   select case
     when p_surface = 'word' then p_project_id is null
     when p_surface = 'chat' then
@@ -6197,7 +6293,17 @@ as $$
         from public.chats chat
         where chat.id = p_conversation_id
           and chat.user_id = p_actor_user_id
-          and chat.org_id is null
+          and (
+            not public.org_is_team(chat.org_id)
+            or (
+              chat.project_id is null
+              and exists (
+                select 1 from public.org_members member
+                where member.org_id = chat.org_id
+                  and member.user_id = p_actor_user_id
+              )
+            )
+          )
           and not exists (
             select 1
             from public.chat_access_grants grant_row
@@ -6345,6 +6451,14 @@ begin
       and not public.memory_source_allows_app_memory(
         p_source_surface, p_source_chat_id, p_updated_by, activity.project_id
       )
+    then
+      raise exception using errcode = 'P0001', message = 'memory_scope_ineligible';
+    end if;
+    -- A conversation learns only into the memory of the workspace it is in:
+    -- never an organization's chat into Personal, nor the other way round.
+    if target.scope = 'user'
+      and target.org_id is distinct from
+        public.memory_source_org_id(p_source_surface, p_source_chat_id)
     then
       raise exception using errcode = 'P0001', message = 'memory_scope_ineligible';
     end if;
@@ -6505,11 +6619,13 @@ begin
 
   insert into public.memory_files(scope, user_id, enabled)
   values ('user', p_user_id, true)
-  on conflict (user_id) do nothing;
+  on conflict do nothing;
 
   for target in
     select eligible.id, eligible.scope
     from (
+      -- Every memory that is this person's own: Personal, and the one
+      -- they have in each organization they belong to.
       select file.id, file.scope
       from public.memory_files file
       where file.scope = 'user' and file.user_id = p_user_id
@@ -6628,6 +6744,9 @@ declare
   app_enabled boolean;
   project_enabled boolean;
   pending_actor_ids uuid[];
+  -- The workspace whose memory this conversation's actors learn into: a
+  -- team organization, or null for Personal.
+  workspace_org_id uuid;
 begin
   if p_surface not in ('chat', 'word', 'tabular')
     or p_turn_id is null or p_activity_id is null
@@ -6827,14 +6946,16 @@ begin
       or rearmed.actor_user_id = activity.project_curator_actor_user_id
     );
 
-  insert into public.memory_files(scope, user_id, enabled)
-  select distinct 'user', pending.actor_user_id, true
-  from public.memory_consolidation_states pending
-  where pending.surface = p_surface
-    and pending.conversation_id = p_conversation_id
-    and pending.latest_turn_id is not null
-    and pending.processed_generation < pending.generation
-  on conflict do nothing;
+  workspace_org_id := public.memory_source_org_id(p_surface, p_conversation_id);
+  perform public.ensure_user_memory_file(pending.actor_user_id, workspace_org_id)
+  from (
+    select distinct candidate.actor_user_id
+    from public.memory_consolidation_states candidate
+    where candidate.surface = p_surface
+      and candidate.conversation_id = p_conversation_id
+      and candidate.latest_turn_id is not null
+      and candidate.processed_generation < candidate.generation
+  ) pending;
   if activity.project_id is not null then
     insert into public.memory_files(scope, project_id, enabled)
     values ('project', activity.project_id, true)
@@ -6858,6 +6979,7 @@ begin
       select locked_user_file.id from public.memory_files locked_user_file
       where locked_user_file.scope = 'user'
         and locked_user_file.user_id = any(pending_actor_ids)
+        and locked_user_file.org_id is not distinct from workspace_org_id
       union all
       select locked_project_file.id
       from public.memory_files locked_project_file
@@ -6878,7 +7000,8 @@ begin
   loop
     select * into app_file from public.memory_files memory_file
     where memory_file.scope = 'user'
-      and memory_file.user_id = queued_state.actor_user_id;
+      and memory_file.user_id = queued_state.actor_user_id
+      and memory_file.org_id is not distinct from workspace_org_id;
     app_enabled := coalesce(app_file.enabled, false)
       and public.memory_source_allows_app_memory(
         p_surface, p_conversation_id, queued_state.actor_user_id,
@@ -6923,6 +7046,7 @@ begin
         'conversationGeneration', next_conversation_generation,
         'sourceEpoch', queued_state.source_epoch,
         'appEpoch', case when app_enabled then app_file.epoch else null end,
+        'appOrgId', case when app_enabled then app_file.org_id else null end,
         'projectEpoch', case when project_enabled then project_file.epoch else null end
       ),
       5,
@@ -7023,7 +7147,10 @@ begin
         and (
           (target.scope = 'user'
             and job.payload->>'actorUserId' = target.user_id::text
-            and job.payload->>'appEpoch' = target.epoch::text)
+            and job.payload->>'appEpoch' = target.epoch::text
+            -- A person has one memory per workspace, and their epochs are
+            -- counted separately: a job for one is not a job for another.
+            and job.payload->>'appOrgId' is not distinct from target.org_id::text)
           or
           (target.scope = 'project'
             and job.payload->>'projectId' = target.project_id::text
@@ -7039,7 +7166,10 @@ begin
         and (
           (target.scope = 'user'
             and job.payload->>'actorUserId' = target.user_id::text
-            and job.payload->>'appEpoch' = target.epoch::text)
+            and job.payload->>'appEpoch' = target.epoch::text
+            -- A person has one memory per workspace, and their epochs are
+            -- counted separately: a job for one is not a job for another.
+            and job.payload->>'appOrgId' is not distinct from target.org_id::text)
           or
           (target.scope = 'project'
             and job.payload->>'projectId' = target.project_id::text
@@ -7576,6 +7706,10 @@ revoke all on function public.lock_memory_conversation_source(text, uuid, uuid)
   from public, anon, authenticated;
 revoke all on function public.memory_project_is_private(uuid)
   from public, anon, authenticated;
+revoke all on function public.memory_source_org_id(text, uuid)
+  from public, anon, authenticated;
+revoke all on function public.ensure_user_memory_file(uuid, uuid)
+  from public, anon, authenticated;
 revoke all on function public.memory_source_allows_app_memory(text, uuid, uuid, uuid)
   from public, anon, authenticated;
 revoke all on function public.fence_memory_conversation_delete()
@@ -7688,6 +7822,10 @@ grant execute on function public.memory_project_is_private(uuid)
   to service_role;
 grant execute
   on function public.memory_source_allows_app_memory(text, uuid, uuid, uuid)
+  to service_role;
+grant execute on function public.memory_source_org_id(text, uuid)
+  to service_role;
+grant execute on function public.ensure_user_memory_file(uuid, uuid)
   to service_role;
 grant execute on function public.fence_memory_conversation_delete()
   to service_role;
@@ -8512,5 +8650,6 @@ insert into public.schema_migrations (filename) values
   ('20261012_05_org_logos.sql'),
   ('20261012_06_personal_organizations.sql'),
   ('20261012_07_standalone_org_content.sql'),
-  ('20261013_01_member_handover.sql')
+  ('20261013_01_member_handover.sql'),
+  ('20261013_02_workspace_memory.sql')
 on conflict (filename) do nothing;
