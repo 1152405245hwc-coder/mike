@@ -51,7 +51,7 @@ import {
     SignOutSkeuoIcon,
 } from "@/app/components/shared/AppSidebarSkeuoIcons";
 import { HistorySkeuoIcon } from "@/app/components/shared/HistorySkeuoIcon";
-import { listProjectSummaries } from "@/app/lib/mikeApi";
+import { listProjectsPage } from "@/app/lib/mikeApi";
 import type { Project } from "@/app/components/shared/types";
 import { cn } from "@/app/lib/utils";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
@@ -258,9 +258,12 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
         setLoadingMoreRecentProjects(false);
         loadingMoreRecentProjectsRef.current = false;
 
-        listProjectSummaries({
+        listProjectsPage({
             limit: RECENT_PROJECT_PAGE_SIZE + 1,
             workspace: workspaceParam,
+            scope: "mine",
+            sortKey: "updated",
+            sortDirection: "desc",
             signal: controller.signal,
         })
             .then((projects) => {
@@ -295,10 +298,13 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
         loadingMoreRecentProjectsRef.current = true;
         setLoadingMoreRecentProjects(true);
         try {
-            const projects = await listProjectSummaries({
+            const projects = await listProjectsPage({
                 limit: RECENT_PROJECT_PAGE_SIZE + 1,
                 offset: recentProjects.length,
                 workspace: workspaceParam,
+                scope: "mine",
+                sortKey: "updated",
+                sortDirection: "desc",
             });
             // The workspace changed while this page was in flight: it
             // belongs to a list that is no longer on screen.
