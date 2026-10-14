@@ -1,5 +1,6 @@
 "use client";
 
+import { ProfilePhotoSettings } from "@/app/components/settings/ProfilePhotoSettings";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
@@ -238,6 +239,7 @@ export default function SettingsPage() {
       <section className="space-y-3">
         <SettingsHeading>Profile</SettingsHeading>
         <GlassCardUI>
+          <ProfilePhotoSettings />
           <SettingsRow layout="stacked">
             <div>
               <div className="flex items-start justify-between gap-3">
