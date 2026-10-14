@@ -15,6 +15,7 @@ import type { Db } from "../../lib/supabase";
 import { MAX_PROFILE_IMAGE_BYTES, parseProfileImageDataUrl } from "../../lib/profileImage";
 
 export const MAX_ORG_LOGO_BYTES = MAX_PROFILE_IMAGE_BYTES;
+/** Applies shared raster size, encoding, and signature validation with logo-specific error messages. */
 export function parseOrgLogoDataUrl(value: unknown) {
     return parseProfileImageDataUrl(value, "logo");
 }
