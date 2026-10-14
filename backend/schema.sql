@@ -9006,5 +9006,6 @@ insert into public.schema_migrations (filename) values
   ('20261013_04_public_member_handover.sql'),
   ('20261013_05_org_departure_retention.sql'),
   ('20261013_06_org_departure_listing.sql'),
-  ('20261014_01_user_profile_photos.sql')
+  ('20261014_01_user_profile_photos.sql'),
+  ('20261014_02_validate_user_profile_photos.sql')
 on conflict (filename) do nothing;

@@ -816,7 +816,6 @@ export async function setUserProfilePhoto(photo: string | null): Promise<{ profi
 }
 
 export interface UserLookupResult {
-    profile_photo?: string | null;
     exists: boolean;
     email: string;
     display_name: string | null;
