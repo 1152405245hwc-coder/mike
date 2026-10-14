@@ -81,6 +81,9 @@
         "wrangler": "^4.147.0"
     },
     "overrides": {
+        "@node-minify/core": {
+            "glob": "^10.5.0"
+        },
         "eslint-plugin-react-hooks": "~7.0.1",
         "proxy-addr": "2.0.8",
         "sharp": "^0.35.5",
