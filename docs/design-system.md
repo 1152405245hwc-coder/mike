@@ -123,6 +123,26 @@ itself and swaps its dark-glass blades for the white ones. Anything else drawing
 brand-colored SVG should follow the same pattern rather than hard-coding a
 single palette.
 
+### User avatars
+
+`components/ui/user-avatar.tsx` renders profile photos and the monogram fallback
+for the account button, People/share rows, member pickers, and organization
+members. Pass the identity's email, display name, and `profile_photo` from the
+existing authorized roster response. Row avatars are 20px across, with white
+serif initials for monograms. The background colour is stable and keyed to the
+normalized email, falling back to the display name. A missing or
+unreadable image restores those initials.
+
+The general email lookup returns only identity fields. New direct-share
+recipients show a monogram until their photo is available through an authorized
+roster response; organization pickers can use their existing member photos.
+
+Settings > Profile offers upload, replace, and remove controls. Profile photos
+and organization logos share `ImageCropModal`: both support dragging, keyboard
+positioning, zoom, preview, and explicit saving. Photos use a circular preview
+and a crop that fills it. PNG, JPEG, and WebP source files up to 10 MB are
+rendered to a 256px PNG before upload; the API limits stored images to 512 KB.
+
 ## Typography
 
 Both faces are loaded with `next/font/google` in `frontend/src/app/layout.tsx`

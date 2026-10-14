@@ -1,5 +1,6 @@
 "use client";
 
+import { ProfilePhotoSettings } from "@/app/components/settings/ProfilePhotoSettings";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
@@ -35,6 +36,7 @@ interface EmailWarning {
   message: string;
 }
 
+/** Composes authenticated account settings, including profile-photo editing and account security controls. */
 export default function SettingsPage() {
   const router = useRouter();
   const { user, signOut, updateEmail } = useAuth();
@@ -238,6 +240,7 @@ export default function SettingsPage() {
       <section className="space-y-3">
         <SettingsHeading>Profile</SettingsHeading>
         <GlassCardUI>
+          <ProfilePhotoSettings />
           <SettingsRow layout="stacked">
             <div>
               <div className="flex items-start justify-between gap-3">

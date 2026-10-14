@@ -16,6 +16,11 @@ create table if not exists public.user_profiles (
   user_id uuid not null unique references auth.users(id) on delete cascade,
   email text,
   display_name text,
+  profile_photo text constraint user_profiles_profile_photo_check
+    check (profile_photo is null or (
+      octet_length(profile_photo) <= 699116
+      and profile_photo ~ '^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$'
+    )),
   organisation text,
   jurisdiction text,
   practice_setting text
@@ -9000,5 +9005,7 @@ insert into public.schema_migrations (filename) values
   ('20261013_03_workspace_library.sql'),
   ('20261013_04_public_member_handover.sql'),
   ('20261013_05_org_departure_retention.sql'),
-  ('20261013_06_org_departure_listing.sql')
+  ('20261013_06_org_departure_listing.sql'),
+  ('20261014_01_user_profile_photos.sql'),
+  ('20261014_02_validate_user_profile_photos.sql')
 on conflict (filename) do nothing;
