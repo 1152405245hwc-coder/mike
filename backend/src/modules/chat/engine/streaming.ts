@@ -37,6 +37,7 @@ import {
   CITATIONS_OPEN_TAG,
 } from "./citations";
 import { runToolCalls } from "./tools/toolDispatcher";
+import { documentSearchError } from "./tools/documentSearchErrors";
 import {
   getCachedCaseOpinionTexts,
   type CourtlistenerTurnState,
@@ -124,7 +125,9 @@ function sanitizeAssistantEvent(event: AssistantEvent): AssistantEvent {
       : { ...event, message: ASSISTANT_ERROR_MESSAGE };
   }
   if ("error" in event && typeof event.error === "string" && event.error) {
-    return { ...event, error: TOOL_ERROR_MESSAGE };
+    return event.type === "doc_search"
+      ? { ...event, ...documentSearchError(event.error_code) }
+      : { ...event, error: TOOL_ERROR_MESSAGE };
   }
   return event;
 }
@@ -617,6 +620,7 @@ export async function runLLMStream(params: {
           toolResults,
           docsRead,
           docsFound,
+          documentSearchEvents,
           docsCreated,
           docsReplicated,
           workflowsApplied,
@@ -667,6 +671,7 @@ export async function runLLMStream(params: {
             total_matches: f.total_matches,
           });
         }
+        events.push(...(documentSearchEvents ?? []));
         for (const dl of docsCreated) {
           events.push({
             type: "doc_created",
