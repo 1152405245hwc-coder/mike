@@ -4,6 +4,8 @@ import { listCloudWordChats } from "../api/mikeApi";
 import { listLocalWordChats } from "../lib/localWordChats";
 import type { WordChatStorageMode } from "../lib/wordChatSettings";
 import { WORD_CHAT_HISTORY_CHANGED } from "../lib/wordChatHistoryEvents";
+import { userMessage } from "../lib/notify";
+import { onSessionRecovered } from "../lib/sessionRefresh";
 
 export interface PaginatedChatsState {
   chats: Chat[];
@@ -106,9 +108,9 @@ export function usePaginatedChats(
         setError(
           timedOut
             ? "Chat history took too long to load."
-            : reason instanceof Error
-              ? reason.message
-              : "Failed to load chat history.",
+            : userMessage(reason, {
+                fallback: "Mike couldn't load your chat history. Try again.",
+              }),
         );
       })
       .finally(() => {
@@ -141,6 +143,9 @@ export function usePaginatedChats(
   const retry = useCallback((): void => {
     setRevision((current) => current + 1);
   }, []);
+
+  // A list that failed on an unchecked session reloads once it is back.
+  useEffect(() => onSessionRecovered(retry), [retry]);
 
   return {
     chats,
