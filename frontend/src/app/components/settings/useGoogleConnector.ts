@@ -31,6 +31,8 @@ export type GoogleConnectorStatus = {
   requireWriteApproval?: boolean;
   readOnly?: boolean;
   accountEmail?: string;
+  /** Drive only: the server can open the Google Picker. */
+  pickerAvailable?: boolean;
   tools: NativeConnectorTool[];
 };
 

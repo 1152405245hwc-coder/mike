@@ -1458,6 +1458,17 @@ export async function setGoogleDriveToolEnabled(
     );
 }
 
+export type GoogleDrivePickerSession =
+    import("@mike/contracts").GoogleDrivePickerSession;
+
+/** A short-lived Drive token plus the keys the Google Picker needs. */
+export async function createGoogleDrivePickerSession(): Promise<GoogleDrivePickerSession> {
+    return apiRequest<GoogleDrivePickerSession>(
+        "/user/integrations/google-drive/picker-session",
+        { method: "POST" },
+    );
+}
+
 export async function getProject(projectId: string): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`);
 }

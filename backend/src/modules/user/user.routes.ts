@@ -10,12 +10,15 @@ import { safeError } from "../../lib/safeError";
 import {
     cancelGoogleDriveOAuth,
     completeGoogleDriveOAuth,
+    createGoogleDrivePickerSession,
     disconnectGoogleDrive,
+    GoogleDrivePickerUnavailableError,
     getGoogleDriveStatus,
     setGoogleDriveToolEnabled,
     startGoogleDriveOAuth,
     updateGoogleDriveSettings,
 } from "../../lib/integrations/googleDrive";
+import { GoogleDriveUserError } from "../../lib/integrations/googleDriveHttp";
 import { ConnectorSetupError } from "../../lib/mcp/errors";
 
 import crypto from "crypto";
@@ -23,7 +26,7 @@ import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../../middleware/auth";
 import { asyncRoute, routerErrorHandler } from "../../middleware/asyncRoute";
 import { createServerSupabase } from "../../lib/supabase";
-import { sendInternalError } from "../../lib/httpError";
+import { INTERNAL_ERROR_CODE, sendInternalError } from "../../lib/httpError";
 import { sendServiceFailure } from "../../lib/serviceResult";
 import { dbJobsEnabled } from "../../lib/dbq/runner";
 import { buildContentDisposition } from "../../lib/storage";
@@ -865,6 +868,52 @@ userRouter.delete(
             });
         }
     },
+);
+
+// POST /user/integrations/google-drive/picker-session — a short-lived access
+// token plus the Picker's browser key and app id. no-store: the token must not
+// sit in any cache.
+userRouter.post(
+    "/integrations/google-drive/picker-session",
+    requireAuth,
+    requireMfaIfEnrolled,
+    asyncRoute(async (_req, res) => {
+        const userId = res.locals.userId as string;
+        res.set("Cache-Control", "no-store");
+        try {
+            res.json(
+                await createGoogleDrivePickerSession(
+                    userId,
+                    createServerSupabase(),
+                ),
+            );
+        } catch (err) {
+            // Repo-authored messages: not set up (404), or not connected,
+            // turned off or revoked (409).
+            if (err instanceof GoogleDriveUserError) {
+                return void res
+                    .status(
+                        err instanceof GoogleDrivePickerUnavailableError
+                            ? 404
+                            : 409,
+                    )
+                    .json({
+                        ...(err.code ? { code: err.code } : {}),
+                        detail: err.message,
+                    });
+            }
+            // Token refresh talks to Google with credentials; log the
+            // redacted category only, never the provider's message.
+            console.error("[google-drive] picker session failed", {
+                userId,
+                error: safeError(err),
+            });
+            res.status(500).json({
+                code: INTERNAL_ERROR_CODE,
+                detail: "Google Drive could not be opened. Try again.",
+            });
+        }
+    }),
 );
 
 // PATCH /user/integrations/google-drive — { enabled?, requireWriteApproval? }
