@@ -689,6 +689,9 @@ chatRouter.post("/", requireAuth, asyncRoute(async (req, res) => {
                       lastUser.workflow
                           ? `Workflow: ${lastUser.workflow.title}`
                           : "",
+                      lastUser.playbook
+                          ? `Playbook: ${lastUser.playbook.title}`
+                          : "",
                       lastUser.files?.length
                           ? `Files: ${lastUser.files.map((file) => file.filename).join(", ")}`
                           : "",

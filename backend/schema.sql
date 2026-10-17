@@ -2717,6 +2717,7 @@ create table if not exists public.chat_messages (
   content jsonb,
   files jsonb,
   workflow jsonb,
+  playbook jsonb,
   citations jsonb,
   created_at timestamptz not null default now()
 );
@@ -5468,6 +5469,132 @@ create index if not exists audit_events_user_created on public.audit_events (use
 create index if not exists audit_events_project_created on public.audit_events (project_id, created_at desc);
 alter table public.audit_events enable row level security;
 
+-- Continuously saved playbooks, with a content snapshot retained on each review.
+create table if not exists public.playbooks (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  org_id uuid references public.organizations(id) on delete cascade,
+  visibility text not null default 'private',
+  name text not null,
+  description text not null default '',
+  content_json jsonb not null,
+  source_filename text,
+  source_storage_key text,
+  import_model text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint playbooks_visibility_check check (visibility in ('private', 'organization') and
+    (org_id is not null or visibility = 'private'))
+);
+create index if not exists idx_playbooks_user_updated on public.playbooks(user_id, updated_at desc);
+create index if not exists idx_playbooks_org_updated on public.playbooks(org_id, updated_at desc);
+alter table public.playbooks enable row level security;
+
+create table if not exists public.playbook_runs (
+  id uuid primary key default gen_random_uuid(),
+  playbook_id uuid not null references public.playbooks(id) on delete cascade,
+  content_json jsonb not null,
+  -- The stored document reviewed, and the version holding its tracked changes.
+  document_id uuid references public.documents(id) on delete set null,
+  edited_version_id uuid references public.document_versions(id) on delete set null,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  model text not null,
+  document_name text,
+  review_mode text not null,
+  status text not null,
+  summary text,
+  findings_json jsonb,
+  error text,
+  started_at timestamptz not null,
+  completed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_playbook_runs_playbook_started
+  on public.playbook_runs(playbook_id, started_at desc);
+create index if not exists idx_playbook_runs_document on public.playbook_runs(document_id);
+alter table public.playbook_runs enable row level security;
+
+create table if not exists public.playbook_imports (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  filename text not null,
+  requested_name text,
+  model text not null,
+  status text not null,
+  stage text not null,
+  error text,
+  playbook_id uuid references public.playbooks(id) on delete set null,
+  started_at timestamptz not null,
+  completed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_playbook_imports_user_started
+  on public.playbook_imports(user_id, started_at desc);
+alter table public.playbook_imports enable row level security;
+
+-- Supplementary documents a playbook's rules can refer to: copies the
+-- playbook owns. The imported Word file stays on public.playbooks.
+create table if not exists public.playbook_sources (
+  id uuid primary key default gen_random_uuid(),
+  playbook_id uuid not null references public.playbooks(id) on delete cascade,
+  filename text not null,
+  file_type text not null,
+  storage_key text not null,
+  size_bytes integer not null,
+  extracted_text text not null default '',
+  -- Lets a review list each document's length without loading its text.
+  text_length integer not null default 0,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  constraint playbook_sources_file_type_check check (file_type in ('docx', 'pdf')),
+  constraint playbook_sources_size_check check (size_bytes > 0)
+);
+create index if not exists idx_playbook_sources_playbook_created
+  on public.playbook_sources(playbook_id, created_at);
+alter table public.playbook_sources enable row level security;
+
+-- Who a playbook is shared with: by email for a personal playbook, by member
+-- (including deny) for an organization's.
+create table if not exists public.playbook_shares (
+  id uuid primary key default gen_random_uuid(),
+  playbook_id uuid not null references public.playbooks(id) on delete cascade,
+  shared_by_user_id uuid references auth.users(id) on delete set null,
+  shared_with_email text not null,
+  role text not null default 'viewer'
+    check (role in ('owner', 'editor', 'viewer')),
+  created_at timestamptz not null default now(),
+  constraint playbook_shares_playbook_email_unique
+    unique (playbook_id, shared_with_email),
+  -- Canonical case, like workflow_shares: the unique constraint and the
+  -- access lookup must agree on who a recipient is.
+  constraint playbook_shares_email_lowercase
+    check (shared_with_email = lower(shared_with_email))
+);
+create index if not exists idx_playbook_shares_email
+  on public.playbook_shares(shared_with_email);
+
+create table if not exists public.playbook_org_access_overrides (
+  id uuid primary key default gen_random_uuid(),
+  playbook_id uuid not null references public.playbooks(id) on delete cascade,
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  user_id uuid not null,
+  role text not null constraint playbook_org_access_overrides_role_check
+    check (role in ('owner', 'editor', 'viewer', 'deny')),
+  assigned_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (playbook_id, user_id),
+  -- Leaving the organization removes the grant.
+  foreign key (org_id, user_id)
+    references public.org_members(org_id, user_id) on delete cascade
+);
+create index if not exists idx_playbook_org_access_overrides_user
+  on public.playbook_org_access_overrides(user_id);
+alter table public.playbook_shares enable row level security;
+alter table public.playbook_org_access_overrides enable row level security;
+
 -- Durable, Postgres-backed background jobs (the "DB queue"): default-on
 -- at-least-once execution for audit trails, account deletion, storage
 -- cleanup and export generation — workloads that must be durable in every
@@ -7352,6 +7479,11 @@ begin
       select w.org_id, w.user_id, w.visibility, w.archived_at
         into resource_org_id, resource_creator_id, resource_visibility, archived
       from public.workflows w where w.id = new.workflow_id for update;
+    when 'playbook_org_access_overrides' then
+      -- Playbooks are never archived.
+      select b.org_id, b.user_id, b.visibility, null::timestamptz
+        into resource_org_id, resource_creator_id, resource_visibility, archived
+      from public.playbooks b where b.id = new.playbook_id for update;
     else
       raise exception 'Unsupported organization override table';
   end case;
@@ -7392,6 +7524,9 @@ create trigger project_org_access_overrides_guard before insert or update
 create trigger workflow_org_access_overrides_guard before insert or update
   on public.workflow_org_access_overrides for each row
   execute procedure public.validate_org_access_override();
+create trigger playbook_org_access_overrides_guard before insert or update
+  on public.playbook_org_access_overrides for each row
+  execute procedure public.validate_org_access_override();
 
 -- An organization Owner owns every PUBLIC item, implicitly and immutably.
 -- Remove any former override on one when somebody is promoted to owner, so
@@ -7414,6 +7549,10 @@ begin
     using public.workflows w
     where o.org_id = new.org_id and o.user_id = new.user_id
       and w.id = o.workflow_id and w.visibility = 'organization';
+    delete from public.playbook_org_access_overrides o
+    using public.playbooks b
+    where o.org_id = new.org_id and o.user_id = new.user_id
+      and b.id = o.playbook_id and b.visibility = 'organization';
   end if;
   return new;
 end;
@@ -7799,6 +7938,12 @@ revoke all on public.courtlistener_citation_index from anon, authenticated;
 revoke all on public.courtlistener_opinion_cluster_index from anon, authenticated;
 revoke all on public.audit_events from anon, authenticated;
 revoke all on public.db_jobs from anon, authenticated;
+revoke all on public.playbooks from anon, authenticated;
+revoke all on public.playbook_runs from anon, authenticated;
+revoke all on public.playbook_imports from anon, authenticated;
+revoke all on public.playbook_sources from anon, authenticated;
+revoke all on public.playbook_shares from anon, authenticated;
+revoke all on public.playbook_org_access_overrides from anon, authenticated;
 revoke all on public.memory_files from anon, authenticated;
 revoke all on public.memory_consolidation_states from anon, authenticated;
 revoke all on public.memory_conversation_activity from anon, authenticated;
@@ -8065,6 +8210,40 @@ create trigger document_version_cleanup
 after delete or update of storage_path, pdf_storage_path, deleted_at, content_sha256
 on public.document_versions for each row
 execute function public.queue_document_version_cleanup();
+
+-- Migration date: 2026-10-17
+-- Retire owned files atomically with their rows, including account and
+-- organization cascades. The existing storage worker retries failed deletes.
+create or replace function public.queue_playbook_storage_cleanup()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_key text := to_jsonb(old)->>tg_argv[0];
+begin
+  if v_key is null or v_key = '' then return null; end if;
+  if tg_op = 'UPDATE' then
+    if v_key is not distinct from (to_jsonb(new)->>tg_argv[0]) then
+      return null;
+    end if;
+  end if;
+  insert into public.db_jobs(kind, payload, max_attempts)
+    values ('storage.cleanup', jsonb_build_object('keys', jsonb_build_array(v_key)), 8);
+  return null;
+end;
+$$;
+revoke all on function public.queue_playbook_storage_cleanup() from public, anon, authenticated;
+grant execute on function public.queue_playbook_storage_cleanup() to service_role;
+
+drop trigger if exists playbook_storage_cleanup on public.playbooks;
+create trigger playbook_storage_cleanup
+after delete or update of source_storage_key on public.playbooks
+for each row execute function public.queue_playbook_storage_cleanup('source_storage_key');
+
+drop trigger if exists playbook_source_storage_cleanup on public.playbook_sources;
+create trigger playbook_source_storage_cleanup
+after delete or update of storage_key on public.playbook_sources
+for each row execute function public.queue_playbook_storage_cleanup('storage_key');
 
 -- Authorization remains with the calling service. These are service-role-only
 -- persistence primitives; a parent lock serializes number allocation and
@@ -10707,5 +10886,13 @@ insert into public.schema_migrations (filename) values
   ('20261015_02_tabular_review_updated_sort.sql'),
   ('20261015_03_tabular_review_history_status.sql'),
   ('20261015_04_tabular_review_creator_filter.sql'),
-  ('20261016_01_tabular_review_generation_activity.sql')
+  ('20261016_01_tabular_review_generation_activity.sql'),
+  ('20261016_02_playbooks.sql'),
+  ('20261017_01_playbook_autosave_workspaces.sql'),
+  ('20261017_02_playbook_content_column.sql'),
+  ('20261017_03_playbook_sources.sql'),
+  ('20261017_04_playbook_access.sql'),
+  ('20261017_05_playbook_reviews.sql'),
+  ('20261017_06_remove_unused_playbook_structure.sql'),
+  ('20261017_07_playbook_storage_cleanup.sql')
 on conflict (filename) do nothing;
