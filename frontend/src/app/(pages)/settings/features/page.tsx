@@ -10,6 +10,7 @@ import { GlassCardUI } from "@/shared/ui/GlassCardUI";
 import { SettingsHeading } from "@/app/components/settings/SettingsHeading";
 import { SettingsRow } from "@/app/components/settings/SettingsRow";
 import { ToggleSwitchUI } from "@/shared/ui/ToggleSwitchUI";
+import { WebSearchSection } from "@/app/components/settings/WebSearchSection";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 
 export default function FeaturesPage() {
@@ -106,6 +107,8 @@ export default function FeaturesPage() {
           )}
         </GlassCardUI>
       </section>
+
+      <WebSearchSection />
     </div>
   );
 }

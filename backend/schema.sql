@@ -77,6 +77,14 @@ create table if not exists public.user_profiles (
       jsonb_typeof(response_style) = 'object'
       and octet_length(response_style::text) <= 2000
     ),
+  -- Web search preferences from Settings > Features, stored like
+  -- response_style: only the choices that differ from the default.
+  web_search jsonb not null default '{}'::jsonb
+    constraint user_profiles_web_search_check
+    check (
+      jsonb_typeof(web_search) = 'object'
+      and octet_length(web_search::text) <= 1000
+    ),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -203,6 +211,30 @@ $$;
 revoke all on function public.merge_user_response_style(uuid, jsonb)
   from public, anon, authenticated;
 grant execute on function public.merge_user_response_style(uuid, jsonb)
+  to service_role;
+
+-- Merges a change into one user's web search settings and returns the result,
+-- or null when the user has no profile. A null value in the patch removes that
+-- key, which returns the setting to its default.
+create or replace function public.merge_user_web_search(
+  p_user_id uuid,
+  p_patch jsonb
+)
+returns jsonb
+language sql
+set search_path = ''
+as $$
+  update public.user_profiles
+     set web_search = jsonb_strip_nulls(web_search || p_patch),
+         updated_at = now()
+   where user_id = p_user_id
+     and jsonb_typeof(p_patch) = 'object'
+  returning web_search;
+$$;
+
+revoke all on function public.merge_user_web_search(uuid, jsonb)
+  from public, anon, authenticated;
+grant execute on function public.merge_user_web_search(uuid, jsonb)
   to service_role;
 
 create or replace function public.handle_user_email_updated()
@@ -592,7 +624,7 @@ $$;
 create table if not exists public.user_api_keys (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  provider text not null check (provider in ('claude', 'gemini', 'openai', 'mistral', 'openrouter', 'vercel', 'opencode-go', 'bedrock', 'azure', 'azure-foundry', 'vertex', 'xai', 'custom', 'courtlistener')),
+  provider text not null check (provider in ('claude', 'gemini', 'openai', 'mistral', 'openrouter', 'vercel', 'opencode-go', 'bedrock', 'azure', 'azure-foundry', 'vertex', 'xai', 'custom', 'courtlistener', 'brave', 'tavily', 'deepseek')),
   encrypted_key text not null,
   iv text not null,
   auth_tag text not null,
@@ -630,7 +662,7 @@ create table if not exists public.org_api_keys (
   org_id uuid not null references public.organizations(id) on delete cascade,
   provider text not null
     constraint org_api_keys_provider_check
-    check (provider in ('claude', 'gemini', 'openai', 'mistral', 'openrouter', 'vercel', 'opencode-go', 'bedrock', 'azure', 'azure-foundry', 'vertex', 'xai', 'custom', 'courtlistener')),
+    check (provider in ('claude', 'gemini', 'openai', 'mistral', 'openrouter', 'vercel', 'opencode-go', 'bedrock', 'azure', 'azure-foundry', 'vertex', 'xai', 'custom', 'courtlistener', 'brave', 'tavily', 'deepseek')),
   encrypted_key text not null,
   iv text not null,
   auth_tag text not null,
@@ -10903,8 +10935,10 @@ insert into public.schema_migrations (filename) values
   ('20261017_05_playbook_reviews.sql'),
   ('20261017_06_remove_unused_playbook_structure.sql'),
   ('20261017_07_playbook_storage_cleanup.sql'),
+  ('20261017_08_user_web_search.sql'),
   ('20261018_01_remove_playbook_global_guidance.sql'),
   ('20261018_02_playbook_run_history_index.sql'),
   ('20261019_01_playbook_run_scope.sql'),
-  ('20261020_01_playbook_import_status.sql')
+  ('20261020_01_playbook_import_status.sql'),
+  ('20261020_02_web_search_api_keys.sql')
 on conflict (filename) do nothing;

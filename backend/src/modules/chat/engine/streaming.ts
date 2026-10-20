@@ -1,4 +1,5 @@
 import { teamOrgIdOf } from "../../../lib/personalOrgs";
+import { webSearchAccountFor, type WebSearchPlan } from "../../../lib/webSearch";
 import { buildGoogleWorkspaceTools } from "../../../lib/integrations/googleWorkspace";
 import {
   streamChatWithTools,
@@ -14,6 +15,19 @@ import type { Db } from "../../../lib/supabase";
 import { buildUserMcpTools } from "../../../lib/mcpConnectors";
 import { buildGoogleDriveTools } from "../../../lib/integrations/googleDrive";
 import { COURTLISTENER_TOOLS } from "./tools/courtlistenerTools";
+import {
+  PROVIDER_MAX_SEARCHES,
+  createProviderWebSearchTracker,
+} from "./tools/providerWebSearch";
+import {
+  MIKE_WEB_SEARCH_SYSTEM_PROMPT,
+  PROVIDER_WEB_READ_SYSTEM_PROMPT,
+  WEB_SEARCH_SYSTEM_PROMPT,
+  createWebTurnState,
+  runWebToolCall,
+  webToolErrorMessage,
+  webToolsFor,
+} from "./tools/webSearchTools";
 import {
   type DocStore,
   type DocIndex,
@@ -126,9 +140,13 @@ function sanitizeAssistantEvent(event: AssistantEvent): AssistantEvent {
       : { ...event, message: ASSISTANT_ERROR_MESSAGE };
   }
   if ("error" in event && typeof event.error === "string" && event.error) {
-    return event.type === "doc_search"
-      ? { ...event, ...documentSearchError(event.error_code) }
-      : { ...event, error: TOOL_ERROR_MESSAGE };
+    if (event.type === "doc_search") {
+      return { ...event, ...documentSearchError(event.error_code) };
+    }
+    if (event.type === "web_search" || event.type === "web_read") {
+      return { ...event, error: webToolErrorMessage(event.error_code) };
+    }
+    return { ...event, error: TOOL_ERROR_MESSAGE };
   }
   return event;
 }
@@ -210,6 +228,8 @@ export async function runLLMStream(params: {
   onActivity?: () => void;
   extraTools?: unknown[];
   includeResearchTools?: boolean;
+  /** How this turn may search the web; null or omitted means it may not. */
+  webSearch?: WebSearchPlan | null;
   /** Expose ask_inputs only to clients that can render and answer it. */
   includeAskInputs?: boolean;
   /**
@@ -287,6 +307,7 @@ export async function runLLMStream(params: {
     write: unsafeWrite,
     extraTools,
     includeResearchTools = true,
+    webSearch = null,
     includeAskInputs = true,
     connectorApprovals = false,
     allowDocumentMutation = true,
@@ -315,11 +336,17 @@ export async function runLLMStream(params: {
   const conversationTools = includeAskInputs
     ? TOOLS
     : TOOLS.filter((tool) => tool.function.name !== "ask_inputs");
+  const webTools = webToolsFor(webSearch);
+  const webSearchAccount = webSearchAccountFor(webSearch, apiKeys);
+  const webToolNames = new Set<string>(
+    webTools.map((tool) => tool.function.name),
+  );
   const baseTools = [
     ...conversationTools,
     ...researchTools,
     ...WORKFLOW_TOOLS,
     ...PLAYBOOK_TOOLS,
+    ...webTools,
   ];
   const advertisedTools = [
     ...baseTools,
@@ -356,7 +383,17 @@ export async function runLLMStream(params: {
     orgId,
     sharedAudience: memorySharedAudience,
   });
-  const systemPrompt = memory.systemPrompt;
+  const systemPrompt = [
+    memory.systemPrompt,
+    ...(webSearch
+      ? [
+          WEB_SEARCH_SYSTEM_PROMPT,
+          webSearch === "provider"
+            ? PROVIDER_WEB_READ_SYSTEM_PROMPT
+            : MIKE_WEB_SEARCH_SYSTEM_PROMPT,
+        ]
+      : []),
+  ].join("\n\n");
   const chatMessages: LlmMessage[] = rawMsgs
     .filter((m) => m.role !== "system")
     .map(
@@ -389,6 +426,12 @@ export async function runLLMStream(params: {
   const courtlistenerTurnState: CourtlistenerTurnState = {
     casesByClusterId: new Map(),
   };
+  const webTurnState = createWebTurnState(
+    webSearch
+      ? ([...rawMsgs].reverse().find((m) => m.role === "user")?.content ?? "")
+      : "",
+  );
+  const providerWebSearch = createProviderWebSearchTracker(webTurnState);
   let fullText = "";
   let iterText = "";
   let iterVisibleText = "";
@@ -547,6 +590,10 @@ export async function runLLMStream(params: {
       reasoning: params.reasoning ?? "high",
       abortSignal: signal,
       conversationId,
+      providerWebSearch:
+        webSearch === "provider"
+          ? { maxSearches: PROVIDER_MAX_SEARCHES }
+          : null,
       callbacks: {
         onActivity: params.onActivity,
         onContentDelta: (delta) => {
@@ -580,6 +627,17 @@ export async function runLLMStream(params: {
             })}\n\n`,
           );
         },
+        onWebSearch: (progress) => {
+          const { frame, event } = providerWebSearch.handle(progress);
+          if (frame) {
+            flushText();
+            write(`data: ${JSON.stringify(frame)}\n\n`);
+          }
+          if (event) {
+            events.push(event);
+            write(`data: ${JSON.stringify(event)}\n\n`);
+          }
+        },
       },
       runTools: async (calls) => {
         throwIfAborted(signal);
@@ -587,10 +645,10 @@ export async function runLLMStream(params: {
         // UI sees it before the tool results stream in.
         flushText();
 
-        // Client-executed tools (Word add-in) round-trip through the SSE
-        // stream and never enter the server dispatcher. They run before the
-        // server batch and sequentially among themselves: each call mutates
-        // or reads the live document, so order is part of their semantics.
+        // Web tools and client-executed tools (Word add-in) never enter the
+        // server dispatcher. Web calls run in parallel. Client calls
+        // round-trip through the SSE stream sequentially: each one mutates or
+        // reads the live document, so order is part of their semantics.
         const clientResultByCallId = new Map<string, string>();
         // Enforcement, not just omission: a document-writing call from a
         // caller who may not write is dropped before dispatch, on the server
@@ -601,9 +659,28 @@ export async function runLLMStream(params: {
         const permittedCalls = allowDocumentMutation
           ? calls
           : calls.filter((c) => !isDocumentMutatingTool(c.name));
-        const serverCalls = clientTools
-          ? permittedCalls.filter((c) => !clientTools.owns(c.name))
-          : permittedCalls;
+        const webCalls = permittedCalls.filter((c) => webToolNames.has(c.name));
+        const serverCalls = permittedCalls.filter(
+          (c) => !webToolNames.has(c.name) && !clientTools?.owns(c.name),
+        );
+        const webResults = await Promise.all(
+          webCalls.map((call) =>
+            runWebToolCall(call, {
+              state: webTurnState,
+              account: webSearchAccount,
+              nonce,
+              signal,
+              write,
+            }),
+          ),
+        );
+        throwIfAborted(signal);
+        webCalls.forEach((call, index) => {
+          const { content, event } = webResults[index];
+          clientResultByCallId.set(call.id, content);
+          events.push(event);
+          write(`data: ${JSON.stringify(event)}\n\n`);
+        });
         if (clientTools) {
           for (const call of permittedCalls) {
             if (!clientTools.owns(call.name)) continue;
@@ -811,6 +888,12 @@ export async function runLLMStream(params: {
   }
 
   flushText();
+
+  const citedWebSources = providerWebSearch.citedSources();
+  if (citedWebSources) {
+    events.push(citedWebSources);
+    write(`data: ${JSON.stringify(citedWebSources)}\n\n`);
+  }
 
   // Parse and emit citations from <CITATIONS> block
   const { citations: parsedCitations, diagnostics: citationDiagnostics } =

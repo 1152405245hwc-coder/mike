@@ -225,7 +225,10 @@ export type ApiKeyProvider =
   | "vertex"
   | "xai"
   | "custom"
-  | "courtlistener";
+  | "courtlistener"
+  | "brave"
+  | "tavily"
+  | "deepseek";
 
 /**
  * GET /user/api-keys: whether each provider has a usable key (false for a

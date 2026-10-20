@@ -162,6 +162,7 @@ vi.mock("../../modules/chat/engine/index", async (importOriginal) => {
 vi.mock("../../modules/user/user.settings", () => ({
     getUserModelSettings: vi.fn(async () => ({
         legal_research_us: false,
+        web_search: DEFAULT_WEB_SEARCH_SETTINGS,
         title_model: "test-model",
         tabular_model: "test-model",
         last_selected_chat_model: null,
@@ -203,6 +204,7 @@ import { app } from "../../app";
 import { getActiveAssistantTurn, resetAssistantTurnRunsForTests } from "../../lib/assistantTurnRuns";
 import { spotlight } from "../../modules/chat/engine/index";
 import { createServerSupabase } from "../../lib/supabase";
+import { DEFAULT_WEB_SEARCH_SETTINGS } from "../../lib/webSearch";
 
 const VALID_BODY = {
     messages: [{ role: "user", content: "hello" }],
@@ -421,6 +423,7 @@ describe("POST /projects/:projectId/chat", () => {
         const userSettings = await import("../../modules/user/user.settings.js");
         vi.mocked(userSettings.getUserModelSettings).mockResolvedValueOnce({
             legal_research_us: false,
+            web_search: DEFAULT_WEB_SEARCH_SETTINGS,
             title_model: null,
             memory_curator_model: null,
             last_selected_reasoning_level: null,

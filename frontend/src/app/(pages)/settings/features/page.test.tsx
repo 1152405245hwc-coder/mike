@@ -34,6 +34,10 @@ vi.mock("@/app/components/settings/ApiKeyField", () => ({
     ),
 }));
 
+vi.mock("@/app/components/settings/WebSearchSection", () => ({
+    WebSearchSection: () => null,
+}));
+
 describe("FeaturesPage CourtListener key", () => {
     beforeEach(() => {
         state.source = "env";

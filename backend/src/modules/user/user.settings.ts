@@ -8,6 +8,11 @@ import {
     loadResponseStyle,
     type ResponseStyle,
 } from "./user.responseStyle";
+import { loadWebSearchSettings } from "./user.webSearch";
+import {
+    DEFAULT_WEB_SEARCH_SETTINGS,
+    type WebSearchSettings,
+} from "../../lib/webSearch";
 import { safeError } from "../../lib/safeError";
 import { getEffectiveRouterModels } from "../../lib/routerModels";
 import {
@@ -27,6 +32,7 @@ export type UserModelSettings = {
     /** Cross-surface fallback used only when a chat has no saved level. */
     last_selected_reasoning_level: ReasoningLevel | null;
     legal_research_us: boolean;
+    web_search: WebSearchSettings;
     api_keys: UserApiKeys;
     personalisation?: {
         displayName: string | null;
@@ -62,6 +68,7 @@ export async function getUserModelSettings(
         routerModels,
         customInstructions,
         responseStyle,
+        webSearch,
     ] = await Promise.all([
         client
             .from("user_profiles")
@@ -86,6 +93,13 @@ export async function getUserModelSettings(
                 safeError(error),
             );
             return DEFAULT_RESPONSE_STYLE;
+        }),
+        loadWebSearchSettings(client, userId).catch((error: unknown) => {
+            console.error(
+                "[user-settings] web search settings load failed",
+                safeError(error),
+            );
+            return DEFAULT_WEB_SEARCH_SETTINGS;
         }),
     ]);
     let data = profileResult.data;
@@ -180,6 +194,7 @@ export async function getUserModelSettings(
         legal_research_us:
             (data as { legal_research_us?: boolean | null } | null)
                 ?.legal_research_us !== false,
+        web_search: webSearch,
         personalisation: {
             displayName:
                 typeof data?.display_name === "string"
