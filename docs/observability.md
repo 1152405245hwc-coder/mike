@@ -46,7 +46,7 @@ with SENTRY_DISABLED=true or point SENTRY_DSN at your own project.`
 
 **Public DSN does not mean public error reports.** A DSN lets an SDK submit
 events; it does not grant access to read stored events or administer the
-Sentry organization. Mike's default reports go to the maintainers' `mike-xp`
+Sentry organization. Mike's default reports go to the maintainers' `open-legal-products`
 organization. The source-map upload token (`SENTRY_AUTH_TOKEN`) is a separate,
 privileged secret and must never appear in source or browser bundles. See
 [Sentry's explanation of public DSNs](https://www.sentry.help/en/articles/13964341-my-dsn-key-is-publicly-visible-is-this-a-security-vulnerability).
@@ -77,9 +77,9 @@ cannot stop that sender. The controls below protect different things:
 | Quota budget in the final transport | Per issue as Sentry groups it (the diagnostic fingerprint, error type and top frame), only occurrences 1, 2, 4, 8, … are sent, each tagged `occurrence`; the count restarts after an hour without that issue. Each SDK client also sends at most 50 events a day across all issues. Diagnostic test probes skip the per-issue step. A loop failing every second costs about 17 events a day per issue. This replaced a flat 60-a-minute cap, under which one install's stuck poll loops used the whole 5,000-event month in nine hours (2026-09-23). | Per process, worker thread, browser tab, or task pane, so a fleet of installs still adds up. Restarts reset it. Installs built before this change keep the old cap until they update. Does not stop direct submissions to the public DSN. |
 | Duplicate and expected-error suppression | Explicit reports mark the same error object to prevent a later console/unhandled duplicate. API 4xx and deliberate client cancellations are excluded from the API reporting paths. | New error objects or independent console messages can still produce events. Grouping several events into one issue does not make them one quota unit. |
 | Non-error telemetry | The final transport rejects sessions, transactions, spans, logs, replay, attachments and every other non-error item. | Adding a new telemetry category requires an explicit privacy-reviewed policy change. |
-| Sentry spike protection | Enabled on all three Mike projects when checked on 2026-09-22 UTC. | Uses historical volume; Sentry explicitly says it must not be the sole defense. |
-| Inbound filters | The frontend project has browser-extension, crawler, legacy-browser, hydration-error, and chunk-load-error filters enabled; localhost filtering is off (checked on the same date). | Filters can hide genuine bugs too. Custom release/message filters are unavailable on the current plan; no custom IP blocklist was set on the inspected frontend project. |
-| Hard DSN rate limit | The inspected frontend key has no custom limit. Its controls require Business or above, while Mike currently uses Developer with 5,000 errors per month. | The monthly allowance can be exhausted, leaving genuine new errors unrecorded. |
+| Sentry spike protection | Enabled on all three projects of the `open-legal-products` organization when checked on 2026-10-20 UTC; no project notification actions are attached. | Uses historical volume; Sentry explicitly says it must not be the sole defense. |
+| Inbound filters | The frontend project has browser-extension, crawler, legacy-browser, hydration-error, and chunk-load-error filters enabled; localhost filtering is off (checked on the same date). | Filters can hide genuine bugs too. Custom release/message filters are offered during the Business trial but none are set, and the Developer plan does not offer them; no custom IP blocklist was set on the inspected frontend project. |
+| Hard DSN rate limit | The inspected frontend key has no custom limit. The organization was created on a 14-day Business trial (1,000,000 errors) that ends on 2026-11-03; it then falls back to the Developer plan with 5,000 errors per month, where key rate-limit controls are unavailable. | The monthly allowance can be exhausted, leaving genuine new errors unrecorded. |
 | Official/community isolation | Separate backend, frontend, and add-in projects; official and community events currently share each runtime's default key/project. | `install=official` is a client-supplied tag, not authentication or a reserved quota. |
 
 These are a dated account audit, not settings enforced by the repository.
@@ -96,9 +96,10 @@ For stronger protection, maintainers should:
    understand that it reserves a minimum and can still draw from unallocated
    capacity; it is not automatically a per-project ceiling.
 2. Keep spike protection on and configure spike/usage notifications to a
-   responsible maintainer. The existing new-issue/regression email alert is
-   not a quota alert; the spike-protection page currently has no project
-   notification actions configured.
+   responsible maintainer. The default per-project email alert for
+   high-priority issues is not a quota alert. The owner's personal quota
+   notifications (80% and 100%, by email) are on; the spike-protection page
+   currently has no project notification actions configured.
 3. Set an explicit pay-as-you-go spending ceiling if upgrading to a paid
    plan. A cost ceiling prevents overspending, not loss of error visibility
    when the allowance is consumed. No plan upgrade was made for this audit.
