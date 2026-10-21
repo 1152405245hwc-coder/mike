@@ -366,7 +366,7 @@ export default function PrivacyDataPage() {
               <SettingsLabel>Export account JSON</SettingsLabel>
               <SettingsDescription>
                 Download account metadata, projects, document metadata,
-                workflows, and review data as JSON.
+                workflows, playbooks, and review data as JSON.
               </SettingsDescription>
             </div>
             <PillButtonUI

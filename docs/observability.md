@@ -144,6 +144,15 @@ however many users hit it.
   kinds, claim/tick/retention failures, BullMQ conversion/extraction/delivery
   failures, upload-session processing and conversion failures, worker
   heartbeat and loop failures, and the maintenance sweeps.
+- Playbook reviews and imports (`component=playbooks`, split by `stage`:
+  `import.read` … `import.save`, `review.model`, `review.apply_edits`,
+  `review.save`, `heartbeat`, the `*.record` writes of a failure, staged
+  upload cleanup, and `job.terminal` for an in-process job with the runner
+  off). Tags add `job_kind` and, for imports, `file_type`; `extra` holds only
+  `run_id`, `import_id`, and `playbook_id`. Refusals the user is shown (a bad
+  file, a missing or rejected key, no access) are not reported; model output
+  still invalid after the automatic recompile, timeouts, and provider errors
+  are warnings; crashes and storage or database failures are errors.
 - Process lifecycle: boot configuration failures, worker-thread crashes and
   respawns, graceful-shutdown errors, workflow-sync job failures. Unhandled
   promise rejections are reported and then still exit the process, exactly

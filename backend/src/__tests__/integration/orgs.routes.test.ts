@@ -104,6 +104,18 @@ function resetState() {
                 created_at: "t4",
             },
         ],
+        playbooks: [
+            {
+                id: "playbook-1",
+                user_id: "member-1",
+                org_id: "org-1",
+                // Private on purpose: a purge reaches every member's work,
+                // not only what the organization's owners already own.
+                visibility: "private",
+                name: "Supplier terms",
+                created_at: "t5",
+            },
+        ],
         project_access_grants: [],
         project_org_access_overrides: [],
         audit_events: [],
@@ -701,6 +713,7 @@ describe("organization workspace", () => {
         ["chats", "chats"],
         ["tabular-reviews", "tabular_reviews"],
         ["projects", "projects"],
+        ["playbooks", "playbooks"],
     ])("lets an owner delete all organization %s", async (kind, table) => {
         expect(
             tables[table].filter((row) => row.org_id === "org-1").length,
@@ -727,6 +740,16 @@ describe("organization workspace", () => {
         expect(
             tables.projects.filter((row) => row.org_id === "org-1").length,
         ).toBeGreaterThan(0);
+    });
+
+    it("refuses organization playbook deletion to an admin", async () => {
+        tables.org_members[1].role = "admin";
+        as("member-1", "member@firm.example");
+        const res = await request(app)
+            .delete("/orgs/org-1/data/playbooks")
+            .set(...AUTH);
+        expect(res.status).toBe(403);
+        expect(tables.playbooks.map((row) => row.id)).toEqual(["playbook-1"]);
     });
 
     it("answers 404 for a kind of organization data that does not exist", async () => {

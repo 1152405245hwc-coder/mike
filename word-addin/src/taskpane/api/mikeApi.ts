@@ -106,6 +106,7 @@ export {
   getWorkflowAssetUrl,
   listProjects,
   listQuickActions,
+  listPlaybooks,
   listWorkflowAssets,
   listWorkflows,
   postWordChatToolResult,
@@ -181,6 +182,7 @@ interface WordChatServerMessage {
   content: string | unknown[] | null;
   files?: { filename: string; document_id?: string }[] | null;
   workflow?: { id: string; title: string } | null;
+  playbook?: { id: string; title: string } | null;
   citations?: unknown;
   edits?: unknown;
 }
@@ -316,6 +318,7 @@ export async function getCloudWordChat(
           content: typeof message.content === "string" ? message.content : "",
           files: message.files ?? undefined,
           workflow: message.workflow ?? undefined,
+          playbook: message.playbook ?? undefined,
         };
       }
       const events = normalizeStoredAssistantEvents(message.content);

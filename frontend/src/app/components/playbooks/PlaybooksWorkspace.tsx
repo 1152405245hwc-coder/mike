@@ -352,7 +352,19 @@ function PlaybooksWorkspace() {
         .includes(search.trim().toLowerCase())
     );
   });
-  const canEdit = !!selected && selected.canEdit === true;
+  // A replacement import rewrites the whole playbook when it finishes, and
+  // so does every autosave: whichever lands last wins. Hold the playbook
+  // read-only while one compiles. This follows the imports list, not the
+  // dialog, so it holds after the dialog closes and after a reload.
+  const replacingIds = new Set(
+    imports.flatMap((attempt) =>
+      attempt.status === "running" && attempt.playbookId
+        ? [attempt.playbookId]
+        : [],
+    ),
+  );
+  const canEdit =
+    !!selected && selected.canEdit === true && !replacingIds.has(selected.id);
   const canManageAccess = !!selected && selected.canManageAccess === true;
   const checkedPlaybooks = visiblePlaybooks.filter((item) =>
     selectedIds.has(item.id),
@@ -638,7 +650,8 @@ function PlaybooksWorkspace() {
     details: PlaybookDetails,
     visibility: ContentVisibility,
   ): Promise<boolean> {
-    if (!target.canEdit) return Promise.resolve(false);
+    if (!target.canEdit || replacingIds.has(target.id))
+      return Promise.resolve(false);
     const open = target.id === selected?.id ? content : null;
     const next = { ...(open ?? target.content), ...details };
     if (open) setContent(next);
@@ -693,6 +706,9 @@ function PlaybooksWorkspace() {
 
   /** Shows a finished import's playbook in place of what was loaded. */
   function showImported(saved: Playbook) {
+    // An edit still waiting to be saved holds the content from before the
+    // import; saving it now would put the old rules back.
+    autosave.cancel(saved.id);
     setPlaybooks((current) =>
       current.some((item) => item.id === saved.id)
         ? current.map((item) => (item.id === saved.id ? saved : item))
@@ -770,8 +786,15 @@ function PlaybooksWorkspace() {
             if (stopped || attempt.status === "running") return;
             if (finishedImports.current.has(id)) return;
             finishedImports.current.add(id);
-            setImports((current) => current.filter((item) => item.id !== id));
-            await importFinished.current(attempt);
+            try {
+              await importFinished.current(attempt);
+            } finally {
+              // Only now, with the rewritten content loaded, does a replaced
+              // playbook become editable again.
+              setImports((current) =>
+                current.filter((item) => item.id !== id),
+              );
+            }
           })
           .catch(() => {
             // A missed poll is retried on the next tick.
@@ -1336,7 +1359,11 @@ function PlaybooksWorkspace() {
       {detailsPlaybook && (
         <PlaybookDetailsModal
           open
-          playbook={detailsPlaybook}
+          playbook={
+            replacingIds.has(detailsPlaybook.id)
+              ? { ...detailsPlaybook, canEdit: false }
+              : detailsPlaybook
+          }
           content={
             detailsPlaybook.id === selected?.id && content
               ? content

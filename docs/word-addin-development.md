@@ -173,6 +173,12 @@ The add-in sends the active Word document to `POST /word-chat` as document
 context. The backend adds Word-specific instructions and streams the response.
 Suggested edits are rendered as cards and applied as tracked changes for review.
 
+The composer's **+** menu attaches a workflow or a playbook to the next message,
+as the web composer does. The playbook travels on the user message as
+`playbook: { id, title }`, is stored with it (`word_chat_messages.playbook`,
+migration `20261021_04`), and shows as a pill on that message. See
+[Playbooks](playbooks.md#in-the-assistant).
+
 Cloud chat storage uses the backend `word_*` tables. Existing deployments need
 the `20260809_01_word_addin_chats.sql` migration; fresh databases already
 contain those tables.
