@@ -184,8 +184,10 @@ function envApiKey(provider: ApiKeyProvider): string | null {
         // shared endpoints in MIKE_MODEL_CONFIG_JSON.
         case "custom":
             return null;
+        // CourtListener is a connector: each user (or their organization)
+        // saves its own token, as with every other connection.
         case "courtlistener":
-            return process.env.COURTLISTENER_API_TOKEN?.trim() || null;
+            return null;
         case "brave":
             return process.env.BRAVE_SEARCH_API_KEY?.trim() || null;
         case "tavily":

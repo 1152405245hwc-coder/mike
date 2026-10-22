@@ -89,6 +89,7 @@ vi.mock("../../lib/integrations/googleDrive", async (importOriginal) => {
 import { app } from "../../app";
 import { ConnectorSetupError } from "../../lib/mcp/errors";
 import { McpOAuthRequiredError } from "../../lib/mcp/oauth";
+import { GoogleDriveUnavailableError } from "../../lib/integrations/googleDrive";
 
 const ORIGINAL_API_PUBLIC_URL = process.env.API_PUBLIC_URL;
 
@@ -284,6 +285,22 @@ describe("POST /user/integrations/google-drive/oauth/start", () => {
         expect(res.body.detail).toContain(
             "http://localhost:3000/api/user/integrations/google-drive/oauth/callback",
         );
+    });
+
+    it("answers 404 connector_unavailable when the operator switched Drive off", async () => {
+        startGoogleDriveOAuth.mockRejectedValue(
+            new GoogleDriveUnavailableError(),
+        );
+
+        const res = await request(app).post(
+            "/user/integrations/google-drive/oauth/start",
+        );
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({
+            code: "connector_unavailable",
+            detail: "Google Drive is not offered on this Mike server.",
+        });
     });
 
     it("does not echo arbitrary error messages to the client", async () => {

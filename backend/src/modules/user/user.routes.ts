@@ -13,6 +13,7 @@ import {
     createGoogleDrivePickerSession,
     disconnectGoogleDrive,
     GoogleDrivePickerUnavailableError,
+    GoogleDriveUnavailableError,
     getGoogleDriveStatus,
     setGoogleDriveToolEnabled,
     startGoogleDriveOAuth,
@@ -792,6 +793,12 @@ userRouter.post(
             );
             res.json(result);
         } catch (err) {
+            // A service the operator switched off is not a setup problem
+            // the user can fix: say so, with no consent URL to open.
+            if (err instanceof GoogleDriveUnavailableError)
+                return void res
+                    .status(404)
+                    .json({ code: err.code, detail: err.message });
             console.error("[google-drive] oauth start failed", {
                 userId,
                 error: safeError(err),
@@ -922,12 +929,13 @@ userRouter.post(
                 ),
             );
         } catch (err) {
-            // Repo-authored messages: not set up (404), or not connected,
-            // turned off or revoked (409).
+            // Repo-authored messages: not set up or switched off by the
+            // operator (404), or not connected, turned off or revoked (409).
             if (err instanceof GoogleDriveUserError) {
                 return void res
                     .status(
-                        err instanceof GoogleDrivePickerUnavailableError
+                        err instanceof GoogleDrivePickerUnavailableError ||
+                            err instanceof GoogleDriveUnavailableError
                             ? 404
                             : 409,
                     )

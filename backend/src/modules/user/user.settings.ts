@@ -2,6 +2,7 @@ import { createServerSupabase, type Db } from "../../lib/supabase";
 import { type UserApiKeys } from "../../lib/llm";
 import { type ReasoningLevel } from "../../lib/llm";
 import { getEffectiveApiKeys } from "./user.apiKeyStore";
+import { courtlistenerBulkDataEnabled } from "../../lib/courtlistener";
 import { loadCustomInstructions } from "./user.customInstructions";
 import {
     DEFAULT_RESPONSE_STYLE,
@@ -34,6 +35,11 @@ export type UserModelSettings = {
     last_selected_chat_model: string | null;
     /** Cross-surface fallback used only when a chat has no saved level. */
     last_selected_reasoning_level: ReasoningLevel | null;
+    /**
+     * Whether the assistant gets the CourtListener tools: the user's switch is
+     * on and the connector is usable, through a saved token or the
+     * deployment's bulk index.
+     */
     legal_research_us: boolean;
     web_search: WebSearchSettings;
     api_keys: UserApiKeys;
@@ -226,7 +232,8 @@ export async function getUserModelSettings(
         ),
         legal_research_us:
             (data as { legal_research_us?: boolean | null } | null)
-                ?.legal_research_us !== false,
+                ?.legal_research_us !== false &&
+            (!!api_keys.courtlistener || courtlistenerBulkDataEnabled()),
         web_search: webSearch,
         personalisation: {
             displayName:
