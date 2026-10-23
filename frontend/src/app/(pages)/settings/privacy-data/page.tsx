@@ -11,6 +11,12 @@ import { GlassCardUI } from "@/shared/ui/GlassCardUI";
 import { SettingsHeading } from "@/app/components/settings/SettingsHeading";
 import { SettingsRow } from "@/app/components/settings/SettingsRow";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
+import {
+  PERSONAL_WORKSPACE,
+  PERSONAL_WORKSPACE_LABEL,
+  useWorkspace,
+} from "@/app/contexts/WorkspaceContext";
+import { useHasMultipleWorkspaces } from "@/app/hooks/useHasMultipleWorkspaces";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import {
   MfaVerificationPopup,
@@ -42,34 +48,47 @@ const devLog = (...args: Parameters<typeof console.log>) => {
   if (isDev) console.log(...args);
 };
 
-const DELETE_DATA_COPY: Record<
-  DeleteDataAction,
-  {
-    title: string;
-    message: string;
+/**
+ * The confirmation for deleting data in one workspace. Each "Delete all"
+ * reaches the active workspace only. `workspaceName` is set when the person
+ * has more than one workspace, and the copy then says which; with only
+ * Personal there is nothing to tell apart, and it names none.
+ */
+function deleteDataCopy(
+  action: DeleteDataAction,
+  personal: boolean,
+  workspaceName: string | null,
+): { title: string; message: string } {
+  const where = workspaceName ? ` in ${workspaceName}` : "";
+  const others = workspaceName ? " Your other workspaces are not affected." : "";
+  const undo = "This action cannot be undone.";
+  switch (action) {
+    case "chats":
+      return {
+        title: `Delete all chats${where}?`,
+        message: `This will permanently delete your assistant and tabular review chat history${where}.${others} ${undo}`,
+      };
+    case "tabular-reviews":
+      return {
+        title: `Delete all tabular reviews${where}?`,
+        message: `This will permanently delete all tabular reviews you own${where}, including their cells and review chats.${others} ${undo}`,
+      };
+    case "projects":
+      return {
+        title: `Delete all projects${where}?`,
+        message: personal
+          ? `This will permanently delete all projects you own${where}, including their documents, chats, and tabular reviews.${others} ${undo}`
+          : `This will permanently delete all projects you created${where}, including their documents, chats, and tabular reviews. Colleagues lose them too.${others} ${undo}`,
+      };
+    case "memory":
+      return {
+        title: `Delete all memory${where}?`,
+        message: personal
+          ? `This permanently deletes your ${workspaceName ? `${workspaceName} memory` : "app memory"} and memories for private projects you created. Project collaborators will also lose those memories.${others} Memory remains enabled and can be rebuilt from future conversations. ${undo}`
+          : `This permanently deletes your memory${where}. Project memories there are not affected, and neither are your other workspaces. Memory remains enabled and can be rebuilt from future conversations. ${undo}`,
+      };
   }
-> = {
-  chats: {
-    title: "Delete all chats?",
-    message:
-      "This will permanently delete your assistant and tabular review chat history. This action cannot be undone.",
-  },
-  "tabular-reviews": {
-    title: "Delete all tabular reviews?",
-    message:
-      "This will permanently delete all tabular reviews you own, including their cells and review chats. This action cannot be undone.",
-  },
-  projects: {
-    title: "Delete all projects?",
-    message:
-      "This will permanently delete all projects you own, including their documents, chats, and tabular reviews. This action cannot be undone.",
-  },
-  memory: {
-    title: "Delete all memory?",
-    message:
-      "This permanently deletes your app memory and memories for private projects you created. Project collaborators will also lose those memories. Memory remains enabled and can be rebuilt from future conversations. This action cannot be undone.",
-  },
-};
+}
 
 /** Imperative, lower case: "Couldn't delete your chats". */
 const DELETE_ACTION_LABELS: Record<DeleteDataAction, string> = {
@@ -79,7 +98,35 @@ const DELETE_ACTION_LABELS: Record<DeleteDataAction, string> = {
   memory: "delete your memory",
 };
 
+// Deletion works on the active workspace. Keyed by it, so switching
+// workspace drops a confirmation or verification still open for the old one
+// rather than carrying it into the new one.
 export default function PrivacyDataPage() {
+  const { workspaceId, activeOrganization } = useWorkspace();
+  const multipleWorkspaces = useHasMultipleWorkspaces();
+  const workspace = workspaceId ?? PERSONAL_WORKSPACE;
+  return (
+    <PrivacyData
+      key={workspace}
+      workspace={workspace}
+      workspaceName={
+        multipleWorkspaces
+          ? (activeOrganization?.name ?? PERSONAL_WORKSPACE_LABEL)
+          : null
+      }
+    />
+  );
+}
+
+function PrivacyData({
+  workspace,
+  workspaceName,
+}: {
+  /** "personal" or an organization id. */
+  workspace: string;
+  /** The workspace's name when the person has more than one, else null. */
+  workspaceName: string | null;
+}) {
   const { loadChats, setCurrentChatId } = useChatHistoryContext();
   const [pendingDeleteAction, setPendingDeleteAction] =
     useState<DeleteDataAction | null>(null);
@@ -258,15 +305,15 @@ export default function PrivacyDataPage() {
         return;
       }
       if (action === "chats") {
-        await deleteAllChats();
+        await deleteAllChats(workspace);
         setCurrentChatId(null);
         await loadChats();
       } else if (action === "tabular-reviews") {
-        await deleteAllTabularReviews();
+        await deleteAllTabularReviews(workspace);
       } else if (action === "memory") {
-        await deleteAllMemories();
+        await deleteAllMemories(workspace);
       } else {
-        await deleteAllProjects();
+        await deleteAllProjects(workspace);
         setCurrentChatId(null);
         await loadChats();
       }
@@ -313,8 +360,9 @@ export default function PrivacyDataPage() {
     }
   };
 
+  const personal = workspace === PERSONAL_WORKSPACE;
   const pendingDeleteCopy = pendingDeleteAction
-    ? DELETE_DATA_COPY[pendingDeleteAction]
+    ? deleteDataCopy(pendingDeleteAction, personal, workspaceName)
     : null;
 
   return (
@@ -407,6 +455,12 @@ export default function PrivacyDataPage() {
 
       <section className="space-y-3">
         <SettingsHeading>Delete data</SettingsHeading>
+        {workspaceName && (
+          <SettingsDescription>
+            Deletes data in {workspaceName} only. To delete data in another
+            workspace, switch to it first.
+          </SettingsDescription>
+        )}
         <GlassCardUI>
           <SettingsRow>
             <div className="space-y-1">
@@ -452,8 +506,9 @@ export default function PrivacyDataPage() {
             <div className="space-y-1">
               <SettingsLabel>Delete all projects</SettingsLabel>
               <SettingsDescription>
-                Permanently delete all projects you own, including documents,
-                chats, and tabular reviews.
+                {personal
+                  ? "Permanently delete all projects you own, including documents, chats, and tabular reviews."
+                  : "Permanently delete all projects you created here, including documents, chats, and tabular reviews."}
               </SettingsDescription>
             </div>
             <PillButtonUI
@@ -472,8 +527,11 @@ export default function PrivacyDataPage() {
             <div className="space-y-1">
               <SettingsLabel>Delete all memory</SettingsLabel>
               <SettingsDescription>
-                Permanently delete your app memory and memories for private
-                projects you created.
+                {!personal
+                  ? `Permanently delete your memory in ${workspaceName ?? "this workspace"}.`
+                  : workspaceName
+                    ? `Permanently delete your ${workspaceName} memory and memories for private projects you created.`
+                    : "Permanently delete your app memory and memories for private projects you created."}
               </SettingsDescription>
             </div>
             <PillButtonUI
