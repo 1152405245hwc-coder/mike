@@ -409,6 +409,11 @@ create table if not exists public.organizations (
   -- provider key (20261024_01). Kept, always false, so a backend on the
   -- previous release follows the same rule during a deploy.
   allow_personal_api_keys boolean not null default false,
+  -- Whether members other than its owners may export, and bulk-delete, their
+  -- own work in this organization from Settings > Privacy & Data. Off until
+  -- an owner allows it.
+  allow_member_exports boolean not null default false,
+  allow_member_deletes boolean not null default false,
   -- When the organization's logo (org_logos) was last set, or null for none.
   -- Kept in step by a trigger on org_logos; clients read it to know whether
   -- there is a logo and when to fetch it again.
@@ -11094,5 +11099,6 @@ insert into public.schema_migrations (filename) values
   ('20261022_01_workspace_connectors.sql'),
   ('20261024_01_org_keys_central_only.sql'),
   ('20261024_02_workspace_scoped_data_deletion.sql'),
-  ('20261024_03_backfill_project_child_org_id.sql')
+  ('20261024_03_backfill_project_child_org_id.sql'),
+  ('20261024_04_org_member_data_policy.sql')
 on conflict (filename) do nothing;
