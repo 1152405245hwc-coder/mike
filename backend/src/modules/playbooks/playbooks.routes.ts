@@ -57,6 +57,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const playbooksRouter = Router();
 playbooksRouter.use(requireAuth);
 
+// A malformed id reached Postgres as `uuid = 'not-a-uuid'` (22P02) and
+// surfaced as a 500. An id that cannot exist is not found, before any query.
+playbooksRouter.param("playbookId", (_req, res, next, value: string) => {
+  if (!UUID.test(value))
+    return void res.status(404).json({ detail: "Playbook not found." });
+  next();
+});
+
 const UPLOAD_URL_TTL_SECONDS = 900;
 
 function sendError(res: Response, error: unknown): void {
@@ -302,15 +310,27 @@ playbooksRouter.post("/import", requireMfaIfEnrolled, async (req, res) => {
     typeof req.body?.playbookId === "string" && req.body.playbookId.trim()
       ? req.body.playbookId.trim()
       : undefined;
+  // Body ids are request input. A value that cannot be a uuid is a 400,
+  // matching how chat and word-chat reject a malformed id, before any query.
+  if (playbookId !== undefined && !UUID.test(playbookId)) {
+    return void res.status(400).json({ detail: "playbookId must be a UUID" });
+  }
   const model = typeof req.body?.model === "string" ? req.body.model : "";
   const name = typeof req.body?.name === "string" ? req.body.name : undefined;
+  const documentId =
+    typeof req.body?.documentId === "string" && req.body.documentId
+      ? req.body.documentId
+      : undefined;
+  if (documentId !== undefined && !UUID.test(documentId)) {
+    return void res.status(400).json({ detail: "documentId must be a UUID" });
+  }
   // A saved document is read where it is stored; access is checked there.
-  if (typeof req.body?.documentId === "string" && req.body.documentId) {
+  if (documentId) {
     try {
       const attempt = await queuePlaybookImport({
         userId,
         userEmail: res.locals.userEmail,
-        source: { documentId: req.body.documentId },
+        source: { documentId },
         name,
         model,
         playbookId,
@@ -720,16 +740,20 @@ playbooksRouter.post("/:playbookId/review", async (req, res) => {
       req.body?.reviewScope === "issues"
         ? ("issues" as const)
         : ("full" as const);
+    const documentId =
+      typeof req.body?.documentId === "string" && req.body.documentId
+        ? req.body.documentId
+        : undefined;
+    if (documentId !== undefined && !UUID.test(documentId)) {
+      return void res.status(400).json({ detail: "documentId must be a UUID" });
+    }
     const run = await queuePlaybookReview({
       userId: res.locals.userId as string,
       userEmail: res.locals.userEmail,
       playbookId: req.params.playbookId,
       documentText: text,
       documentName,
-      documentId:
-        typeof req.body?.documentId === "string" && req.body.documentId
-          ? req.body.documentId
-          : undefined,
+      documentId,
       instructions,
       model,
       reviewMode,
